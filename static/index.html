@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RollCut OS - 1D Cutting Stock Optimization System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <div class="app-container">
+    <!-- Navigation / Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="logo-mark">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="18" rx="3"></rect>
+            <line x1="8" y1="3" x2="8" y2="21"></line>
+            <line x1="15" y1="3" x2="15" y2="21"></line>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">RollCut OS</h1>
+          <span class="brand-subtitle">1D Cutting Stock Optimization Engine &bull; ML-Driven</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-theme-toggle" class="btn btn-secondary" title="Switch Light / Dark Theme">
+          <svg id="theme-icon-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg id="theme-icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <span id="theme-label">Dark Mode</span>
+        </button>
+        <button id="btn-export-img" class="btn btn-secondary" style="display: none;"
+          title="Save visual cutting design as high-resolution PNG image">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+            <polyline points="21 15 16 10 5 21"></polyline>
+          </svg>
+          Save Design (Image)
+        </button>
+        <button id="btn-print" class="btn btn-secondary" style="display: none;" title="Print shop-floor work order">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 6 2 18 2 18 9"></polyline>
+            <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+            <rect x="6" y="14" width="12" height="8"></rect>
+          </svg>
+          Print Work Order
+        </button>
+
+        <button id="btn-export-trials" class="btn btn-secondary" style="display: none;" title="Export all combinations and trials evaluated by the ML model as a Microsoft Excel workbook (.xlsx)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <line x1="10" y1="9" x2="8" y2="9"></line>
+          </svg>
+          Export All Trials (Excel .xlsx)
+        </button>
+      </div>
+    </header>
+
+    <!-- Operational KPI Summary Bar -->
+    <section class="kpi-grid" id="kpi-section" style="display: none;">
+      <div class="kpi-card yield-card">
+        <div class="kpi-label">Overall Material Yield</div>
+        <div class="kpi-value" id="kpi-yield">--%</div>
+        <div class="kpi-subtext" id="kpi-yield-sub">Mathematical optimum</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Master Rolls Consumed</div>
+        <div class="kpi-value" id="kpi-rolls">--</div>
+        <div class="kpi-subtext" id="kpi-capacity">Capacity: -- mm</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Material Demanded</div>
+        <div class="kpi-value" id="kpi-demand">-- mm</div>
+        <div class="kpi-subtext" id="kpi-cuts-count">-- total cuts</div>
+      </div>
+      <div class="kpi-card scrap-card">
+        <div class="kpi-label">Net Scrap / Waste</div>
+        <div class="kpi-value" id="kpi-waste">-- mm</div>
+        <div class="kpi-subtext" id="kpi-waste-pct">--% total scrap</div>
+      </div>
+    </section>
+
+    <!-- Main Workspace Split Grid -->
+    <main class="workspace-grid">
+      <!-- Left Column: Input Controls -->
+      <section class="panel input-panel">
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title">1. Master Roll Inventory</h2>
+            <span class="panel-note">Available raw stock roll widths in warehouse</span>
+          </div>
+          <div class="order-actions-top">
+            <button type="button" id="btn-clear-rolls" class="btn btn-text btn-sm danger"
+              title="Clear all roll sizes">Clear</button>
+          </div>
+        </div>
+
+        <!-- Master Roll Sizes Chip List -->
+        <div class="form-group">
+          <label class="field-label">Available Master Roll Sizes (mm)</label>
+          <div class="chips-container" id="roll-chips-container">
+            <!-- Chips rendered dynamically -->
+          </div>
+          <div class="add-chip-row">
+            <input type="number" id="input-new-roll" placeholder="Width in mm (e.g. 3000)" min="100" step="10" style="flex: 2;">
+            <input type="number" id="input-new-roll-qty" placeholder="Stock Qty (∞)" min="1" step="1" style="flex: 1.2;" title="Available rolls in warehouse (leave blank for unlimited)">
+            <button type="button" id="btn-add-roll" class="btn btn-secondary btn-sm">Add Stock</button>
+          </div>
+        </div>
+
+        <div class="panel-divider"></div>
+
+        <div class="panel-header">
+          <div class="panel-title-group">
+            <h2 class="panel-title">2. Customer Demand Specification</h2>
+            <span class="panel-note">Cut widths and required quantities</span>
+          </div>
+          <div class="order-actions-top">
+            <button type="button" id="btn-import-csv" class="btn btn-text btn-sm"
+              title="Upload CSV with width,quantity columns">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="12" y1="18" x2="12" y2="12"></line>
+                <line x1="9" y1="15" x2="15" y2="15"></line>
+              </svg>
+              Import CSV
+            </button>
+            <input type="file" id="csv-file-input" accept=".csv,.txt" style="display: none;">
+            <button type="button" id="btn-clear-orders" class="btn btn-text btn-sm danger"
+              title="Clear order table">Clear</button>
+          </div>
+        </div>
+
+        <!-- Orders Table Grid -->
+        <div class="table-wrapper">
+          <table class="data-table" id="orders-table">
+            <thead>
+              <tr>
+                <th style="width: 50%;">Width (mm)</th>
+                <th style="width: 35%;">Quantity (pcs)</th>
+                <th style="width: 15%; text-align: center;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="orders-tbody">
+              <!-- Default rows populated via app.js -->
+            </tbody>
+          </table>
+        </div>
+
+        <div class="table-bottom-actions">
+          <button type="button" id="btn-add-order-row" class="btn btn-secondary btn-sm">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Add Item
+          </button>
+          <div class="summary-chip" id="demand-counter">Total Demand: 0 mm</div>
+        </div>
+
+        <div class="submit-action-row" style="display: flex; gap: 8px;">
+          <button type="button" id="btn-solve" class="btn btn-primary btn-block" style="flex: 1;">
+            <span id="btn-solve-text">Calculate Cutting Plan</span>
+            <div id="btn-spinner" class="spinner" style="display: none;"></div>
+          </button>
+          <button type="button" id="btn-reoptimize" class="btn btn-secondary" style="display: none; white-space: nowrap;" title="Re-plan remaining unfulfilled orders with available stock">
+            ↻ Re-Plan Remaining
+          </button>
+        </div>
+
+        <div id="error-message" class="alert-box error" style="display: none;"></div>
+      </section>
+
+      <!-- Right Column: Output Visualization & Manifest -->
+      <section class="panel output-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Production Cutting Plan</h2>
+          <span class="panel-note" id="plan-status-note">Awaiting calculation</span>
+        </div>
+
+        <!-- Placeholder State -->
+        <div id="empty-state" class="empty-state">
+          <div class="empty-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+              stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+              <line x1="3" y1="9" x2="21" y2="9"></line>
+              <line x1="9" y1="21" x2="9" y2="9"></line>
+            </svg>
+          </div>
+          <h3>No Cutting Plan Generated Yet</h3>
+          <p>Define master roll inventory and order requirements on the left, then click <strong>Calculate Cutting
+              Plan</strong> to generate zero-waste patterns.</p>
+        </div>
+
+        <!-- Results Container -->
+        <div id="plan-container" class="plan-container" style="display: none;">
+          <!-- Dynamically populated roll cards -->
+        </div>
+      </section>
+    </main>
+
+
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="app.js"></script>
+</body>
+
+</html>
