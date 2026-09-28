@@ -174,3 +174,31 @@ From an actual factory order requiring **18,000mm** across 8 customer widths usi
 * **4 out of 5 rolls cut with 0mm waste**.
 * Total scrap across 18 meters of material is **only 100mm**.
 * **99.45% overall efficiency**.
+
+---
+
+## 📦 2D Roll Cutting Optimization (Width × Length)
+
+For full 2D roll slitting where master rolls have **width (mm) × length (m)** and orders specify **width (mm) × length (m) × quantity**:
+
+### 1. Dual-ML Architecture
+* **Model 1 (`combo_generator_2d`)**: Multi-Output XGBoost (70 features, depth 8, 450 trees) predicting the exact slitter knife arrangement per roll section.
+* **Model 2 (`waste_scorer_2d`)**: Single-Output XGBoost predicting area waste percentage to validate and rank candidate patterns.
+* **Beam Search Engine**: Discovers high-yield multi-roll schedules, groups orders into length-compatible sections to prevent longitudinal scrap, and repairs overwidth arrangements with greedy gap-filling.
+
+### 2. How to Run 2D
+* **Interactive CLI Tool**:
+  ```bash
+  python main_2d.py
+  ```
+  *(Press Enter to immediately run with default factory catalog and sample orders)*
+* **Standalone Solver Verification**:
+  ```bash
+  python solver_2d.py
+  ```
+* **Retrain 2D ML Models**:
+  ```bash
+  python train_2d.py
+  ```
+* **2D REST API**:
+  `POST /api/optimize-2d` on `http://localhost:5000` with master rolls and customer order specifications.

@@ -1,0 +1,68 @@
+# RollCut-OS: Advanced AI Optimization Implementation Plan
+
+Based on our extensive research and your specific factory constraints (fixed continuous master roll sizes, infinite supply, software-only setup today), here is the complete, prioritized plan to upgrade RollCut-OS to the absolute bleeding edge of cutting optimization.
+
+## User Review Required
+
+> [!IMPORTANT]  
+> Please review this roadmap. The "Phase 1" items are designed to be implemented directly into your existing Python/JavaScript codebase with relatively low effort but high impact. 
+> 
+> Let me know if you want to proceed with executing Phase 1, or if you want to adjust any priorities.
+
+## Phase 1: Immediate Software Wins (High Impact, Low Effort)
+
+These features can be built into your current XGBoost architecture today.
+
+### 1. Tolerance Optimization (Flexible Demand)
+**Goal:** Allow the math to find 0-waste cuts by slightly over/under producing.
+*   **UI Changes (`app.js`):** Change the order input from a single `Qty` field to `Min Qty` and `Max Qty` (e.g., target 500, but 485–515 is acceptable).
+*   **Solver Changes (`solver_v2.py` / `solver_2d.py`):** Update the pattern selection logic. If overproducing within the `Max Qty` limit results in a zero-waste roll, the solver chooses that pattern. 
+*   **Benefit:** Instantly unlocks perfect roll cuts that were previously mathematically impossible due to rigid integer constraints.
+
+### 2. Software-Only Defect Avoidance
+**Goal:** Prepare the system for quality-aware cutting without needing hardware sensors yet.
+*   **UI Changes:** Add an "Exclude Zone" input for master rolls (e.g., "Exclude 800mm to 950mm").
+*   **Solver Changes:** Treat the master roll as two separate, smaller virtual rolls (0-800mm and 950-End) for the purpose of placing customer cuts.
+*   **Benefit:** Allows operators to manually avoid known bad spots on a roll, increasing usable yield.
+
+### 3. Enhanced Multi-Order Batch Intelligence
+**Goal:** Stop greedy sequential cutting and look across the whole order pool.
+*   **Solver Changes:** 
+    *   Increase the beam search width significantly for the initial sorting phase.
+    *   Implement a "Look-Ahead Penalty" in the ranking function. If a pattern leaves a remainder that matches nothing else in the order pool, penalize its score heavily.
+*   **Benefit:** Better combinations of widths/lengths across diverse orders, critical since master roll sizes are fixed.
+
+---
+
+## Phase 2: The Data Loop (Medium Effort)
+
+### 4. Continuous Learning Pipeline
+**Goal:** Make the XGBoost models smarter every day using real factory data, rather than just the synthetic `generator_v2.py` data.
+*   **Backend Changes (`app.py`):** Create a database/logging system that records every executed cutting plan, the exact pool state, and the resulting waste.
+*   **Training Changes (`train_model_v2.py`):** Write an automated script that appends these real-world logs to the training dataset.
+*   **Benefit:** The model stops guessing and starts learning the actual distribution of your specific customers' orders.
+
+---
+
+## Phase 3: Architectural Leap (High Effort, Industry First)
+
+### 5. Hybrid ML + LP (Mathematical Guarantees)
+**Goal:** Prove to customers that your solution is mathematically optimal.
+*   **Implementation:** Integrate Google OR-Tools (Column Generation).
+*   **Workflow:** Your XGBoost model predicts the patterns in 20ms. Those patterns are fed to OR-Tools as a "warm start." OR-Tools validates and proves mathematically that the solution is optimal, returning the guarantee in <200ms.
+*   **Benefit:** You get the speed of ML with the mathematical certainty of a $500k enterprise LP solver.
+
+### 6. Reinforcement Learning (RL) Self-Play
+**Goal:** The ultimate endgame for fixed-roll-size packing.
+*   **Implementation:** Build an OpenAI Gym environment mimicking your factory. State = Order Pool, Action = Pattern, Reward = Minimizing Waste.
+*   **Model:** Replace XGBoost with a Pointer Network trained via PPO (Proximal Policy Optimization).
+*   **Benefit:** The neural network discovers novel, complex batching strategies that human heuristics and traditional LP formulations miss.
+
+---
+
+## Verification Plan (For Phase 1 Execution)
+
+If approved to start Phase 1, we will verify by:
+1.  **Tolerance:** Running a known historical order batch with 0% tolerance (current baseline) vs. 5% tolerance and measuring the exact reduction in `total_waste`.
+2.  **Defect Avoidance:** Simulating a defect in the middle of a master roll and verifying the solver successfully splits orders around it without crashing.
+3.  **Batch Intelligence:** Comparing the overall efficiency (%) of the new beam search logic against the legacy greedy logic on a 20-order test pool.

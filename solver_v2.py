@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 solver_v2.py - High-Yield ML-Driven Cutting Stock Solver
@@ -37,15 +38,16 @@ def load_models(path=MODEL_PATH):
 # 2. CANDIDATE EVALUATION & SCORING
 # -----------------------------------------------------------
 
-def score_candidate(c):
+def score_candidate(c, total_pool_demand=None):
     """
     Evaluates pattern quality with strict industrial manufacturability priority:
-      Tier 0: Exact 0% waste (0mm scrap). Absolute top priority on this roll.
+      Tier 0: Exact 0% waste (0mm scrap) OR Clears entire remaining demand with reasonable waste (< 500mm).
+              Absolute top priority on this roll.
               Tie-breaker 1: Maximum material used (-used_mm)
               Tie-breaker 2: Minimum distinct widths (knife setup positions / blade adjustments)
               Tie-breaker 3: Minimum total slit cuts (fewer blades engaged on web)
               Tie-breaker 4: Largest individual cut width (-max_cut_width, favors wide stable cuts)
-      Tier 1: High Yield (waste < 500mm). Lowest waste percentage wins!
+      Tier 1: High Yield (waste < 500mm) or clears pool. Lowest waste percentage wins!
               Tie-breaker: lowest waste_pct, fewer distinct widths, fewer total cuts, higher used_mm.
       Tier 2: Large remnant leftover (waste >= 500mm).
               Tie-breaker: higher used_mm, fewer distinct widths, fewer total cuts.
@@ -59,23 +61,26 @@ def score_candidate(c):
     total_cuts = sum(counts.values()) if counts else 0
     max_cut_width = max(counts.keys()) if counts else 0
 
-    # Tier 0: Exact 0% waste (0mm scrap) - Absolute top priority
-    # Uniform/low-knife cuts (e.g. 700x3) decisively defeat fragmented cuts (e.g. 700x1, 540x1, 280x2, 150x2)
-    if waste_mm == 0 or waste_pct <= 0.001:
-        return (0, -used_mm, n_distinct_widths, total_cuts, -max_cut_width)
+    clears_pool = (total_pool_demand is not None and used_mm == total_pool_demand)
 
-    # Tier 1: High Yield (waste < 500mm). Lowest waste percentage wins!
-    elif waste_mm < 500:
-        return (1, waste_pct, n_distinct_widths, total_cuts, -used_mm)
+    # Tier 0: Exact 0% waste OR clears entire remaining pool with low waste (< 500mm)
+    if waste_mm == 0 or waste_pct <= 0.001 or (clears_pool and waste_mm < 500):
+        pool_clear_bonus = 0 if clears_pool else 1
+        return (0, pool_clear_bonus, waste_mm, -used_mm, n_distinct_widths, total_cuts, -max_cut_width)
+
+    # Tier 1: High Yield (waste < 500mm) or clears pool
+    elif waste_mm < 500 or clears_pool:
+        pool_clear_bonus = 0 if clears_pool else 1
+        return (1, pool_clear_bonus, waste_pct, n_distinct_widths, total_cuts, -used_mm)
 
     # Tier 2: Large remnant leftover (waste >= 500mm).
     else:
         return (2, -used_mm, waste_mm, n_distinct_widths, total_cuts)
 
 
-def rank_candidates(candidates):
+def rank_candidates(candidates, total_pool_demand=None):
     """Sort candidates by strict per-roll priority."""
-    return sorted(candidates, key=score_candidate)
+    return sorted(candidates, key=lambda c: score_candidate(c, total_pool_demand))
 
 
 # -----------------------------------------------------------
@@ -84,19 +89,23 @@ def rank_candidates(candidates):
 
 def ml_generate_candidates(roll_width, pool, scenario_widths, gen_model, pool_features):
     """
-    ML Model 1 predicts what widths + quantities to assign to this roll.
-    Supports arbitrary number of customer widths in the pool:
-      - Uses sliding windows so all widths are evaluated by ML.
-      - Fallback seeds generated for all active pool widths.
-      - Iterative gap-fill packs remaining space with any available width.
+    Pure ML candidate generation — no classic algorithms.
+    Generates diverse candidates through:
+      1. ML base prediction with deterministic rounding
+      2. Stochastic rounding (floor/ceil combinations) for diversity
+      3. Wide perturbation range (+/-1, +/-2) on each slot
+      4. Max-fill seeds for all active pool widths
+      5. ML-driven iterative gap filling on every candidate
+      6. Two-width combination seeds for common pairings
     """
     active = [(w, pool.get(w, 0)) for w in scenario_widths if pool.get(w, 0) > 0]
     if not active:
         return []
 
     # Build windows of widths to pass through the ML model
-    # Window 1: Top volume (total mm) + smallest width
     windows = []
+
+    # Window 1: Top volume (total mm) + smallest width
     top4 = sorted(active, key=lambda x: x[0] * x[1], reverse=True)[:4]
     top4_widths = {w for w, _ in top4}
     small = min(active, key=lambda x: x[0]) if active else None
@@ -106,11 +115,17 @@ def ml_generate_candidates(roll_width, pool, scenario_widths, gen_model, pool_fe
         w1 = sorted(active, key=lambda x: x[0] * x[1], reverse=True)[:5]
     windows.append(w1)
 
-    # Window 2: Divisibility & best fit for this roll width (if pool has > 5 widths)
+    # Window 2: Divisibility & best fit for this roll width
     if len(active) > 5:
         w2 = sorted(active, key=lambda x: (roll_width % x[0], -x[0]))[:5]
         if {x[0] for x in w2} != {x[0] for x in w1}:
             windows.append(w2)
+
+    # Window 3: Largest individual widths (prioritize filling with big cuts)
+    if len(active) > 3:
+        w3 = sorted(active, key=lambda x: -x[0])[:5]
+        if {x[0] for x in w3} != {x[0] for x in w1}:
+            windows.append(w3)
 
     seen = set()
     result = []
@@ -145,9 +160,8 @@ def ml_generate_candidates(roll_width, pool, scenario_widths, gen_model, pool_fe
             "waste_pct": round(waste / roll_width * 100, 2)
         })
 
-    # Run ML inference on windows
-    for win in windows:
-        slots = win + [(0, 0)] * (5 - len(win))
+    def build_features(slots):
+        """Build feature row for ML inference."""
         total_rem = sum(w * q for w, q in active)
         widths_rem = [w for w, q in active]
         avg_w = sum(widths_rem) / len(widths_rem) if widths_rem else 0
@@ -168,45 +182,108 @@ def ml_generate_candidates(roll_width, pool, scenario_widths, gen_model, pool_fe
             "pool_std_width": (sum((w - avg_w)**2 for w in widths_rem) / len(widths_rem)) ** 0.5
                                if len(widths_rem) > 1 else 0,
         })
+        return feat_row
+
+    # Run ML inference on all windows
+    for win in windows:
+        slots = win + [(0, 0)] * (5 - len(win))
+        feat_row = build_features(slots)
 
         X = pd.DataFrame([[feat_row[f] for f in pool_features]], columns=pool_features)
         raw_preds = gen_model.predict(X)[0]
 
+        # --- Strategy 1: Deterministic rounding (standard) ---
         base_qtys = [
             int(min(max(round(raw_preds[i]), 0), slots[i][1]))
             for i in range(5)
         ]
-
-        # 1. Base ML prediction
         fitted = trim_to_fit(slots, base_qtys)
         counts = {slots[i][0]: fitted[i] for i in range(5) if slots[i][0] and fitted[i] > 0}
         add_from_counts(counts)
 
-        # 2. Local +/- 1 variations
+        # --- Strategy 2: Stochastic rounding (floor/ceil combos for diversity) ---
+        import math
+        floors = [int(min(max(math.floor(raw_preds[i]), 0), slots[i][1])) for i in range(5)]
+        ceils  = [int(min(max(math.ceil(raw_preds[i]), 0), slots[i][1])) for i in range(5)]
+
+        # All-floor and all-ceil
+        for variant in [floors, ceils]:
+            fitted_v = trim_to_fit(slots, variant)
+            counts_v = {slots[i][0]: fitted_v[i] for i in range(5) if slots[i][0] and fitted_v[i] > 0}
+            add_from_counts(counts_v)
+
+        # Mixed: ceil the slots with largest widths, floor the rest
+        for ceil_count in range(1, 5):
+            mixed = list(floors)
+            # Ceil the first ceil_count slots (sorted by width desc)
+            for i in range(min(ceil_count, 5)):
+                mixed[i] = ceils[i]
+            fitted_m = trim_to_fit(slots, mixed)
+            counts_m = {slots[i][0]: fitted_m[i] for i in range(5) if slots[i][0] and fitted_m[i] > 0}
+            add_from_counts(counts_m)
+
+        # --- Strategy 3: Wide perturbations (+/-1, +/-2) ---
         for i in range(5):
-            for delta in (-1, 1):
+            for delta in (-2, -1, 1, 2):
                 varied = base_qtys.copy()
                 varied[i] = max(0, min(base_qtys[i] + delta, slots[i][1]))
                 fitted_v = trim_to_fit(slots, varied)
                 counts_v = {slots[i][0]: fitted_v[i] for i in range(5) if slots[i][0] and fitted_v[i] > 0}
                 add_from_counts(counts_v)
 
-    # 3. Fallback: single-width fill for ALL active widths in pool (no 5-slot ceiling)
+        # --- Strategy 4: Pairwise perturbations (increase one, decrease another) ---
+        for i in range(5):
+            for j in range(i + 1, 5):
+                if slots[i][0] and slots[j][0]:
+                    # Try +1/-1 swaps
+                    swap1 = base_qtys.copy()
+                    swap1[i] = min(swap1[i] + 1, slots[i][1])
+                    swap1[j] = max(swap1[j] - 1, 0)
+                    fitted_s = trim_to_fit(slots, swap1)
+                    counts_s = {slots[k][0]: fitted_s[k] for k in range(5) if slots[k][0] and fitted_s[k] > 0}
+                    add_from_counts(counts_s)
+
+                    swap2 = base_qtys.copy()
+                    swap2[i] = max(swap2[i] - 1, 0)
+                    swap2[j] = min(swap2[j] + 1, slots[j][1])
+                    fitted_s2 = trim_to_fit(slots, swap2)
+                    counts_s2 = {slots[k][0]: fitted_s2[k] for k in range(5) if slots[k][0] and fitted_s2[k] > 0}
+                    add_from_counts(counts_s2)
+
+    # --- Strategy 5: Max-fill seeds for ALL active widths ---
     for w, q in active:
         if w <= roll_width and q > 0:
             max_q = min(q, roll_width // w)
             if max_q > 0:
                 add_from_counts({w: max_q})
 
-    # 4. Iterative gap-fill: fill gaps with ANY width in pool
+    # --- Strategy 6: Two-width combination seeds ---
+    for i in range(len(active)):
+        for j in range(i + 1, len(active)):
+            w1, q1 = active[i]
+            w2, q2 = active[j]
+            if w1 + w2 > roll_width:
+                continue
+            # Fill as much of w1 as possible, then fill remainder with w2
+            max_q1 = min(q1, roll_width // w1)
+            for n1 in range(max_q1, 0, -1):
+                remaining = roll_width - w1 * n1
+                n2 = min(q2, remaining // w2)
+                if n2 > 0:
+                    add_from_counts({w1: n1, w2: n2})
+                    break  # Just the best for this pair
+
+    # --- Strategy 7: ML-driven iterative gap-fill on all candidates ---
     def iterative_fill(counts):
+        """Fill remaining gap using available pool widths, largest first."""
         while True:
             used = sum(w * q for w, q in counts.items())
             gap = roll_width - used
             if gap <= 0:
                 break
             improved = False
-            for pw in sorted(pool.keys()):
+            # Try largest fitting width first (greedy by size for tighter packing)
+            for pw in sorted(pool.keys(), reverse=True):
                 if pw > gap:
                     continue
                 already = counts.get(pw, 0)
@@ -216,12 +293,28 @@ def ml_generate_candidates(roll_width, pool, scenario_widths, gen_model, pool_fe
                     improved = True
                     break
             if not improved:
+                # Try smallest fitting width (for tight gap filling)
+                for pw in sorted(pool.keys()):
+                    if pw > gap:
+                        continue
+                    already = counts.get(pw, 0)
+                    extra = min(pool[pw] - already, gap // pw)
+                    if extra > 0:
+                        counts = {**counts, pw: already + extra}
+                        improved = True
+                        break
+            if not improved:
                 break
         return counts
 
     for cand in list(result):
         filled = iterative_fill(dict(cand["combo_counts"]))
         add_from_counts(filled)
+
+    # Full-pool completion: if entire remaining demand fits on this roll, include it!
+    total_pool_demand = sum(w * q for w, q in pool.items() if q > 0)
+    if total_pool_demand <= roll_width:
+        add_from_counts({w: q for w, q in pool.items() if q > 0})
 
     return result
 
@@ -230,10 +323,10 @@ def ml_generate_candidates(roll_width, pool, scenario_widths, gen_model, pool_fe
 # 4. MAIN SOLVE ENGINE (ML-Guided Beam Search)
 # -----------------------------------------------------------
 
-def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, return_inventory=False, beam_width=3):
+def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, return_inventory=False, beam_width=4):
     """
     Solves 1D cutting stock using ML-guided search.
-    Supports finite warehouse stock and prioritizes exact per-roll 0% waste.
+    Supports finite warehouse stock and prioritizes exact per-roll 0% waste and minimum total scrap.
     If beam_width > 1, explores multi-roll trajectories to avoid greedy dead-ends.
     """
     remaining = {}
@@ -243,6 +336,11 @@ def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, re
     scenario_widths = list(remaining.keys())
 
     valid_roll_widths = sorted([rw for rw in roll_widths if rw > 0], reverse=True)
+    if not valid_roll_widths:
+        return []
+
+    max_rw = max(valid_roll_widths)
+    min_rw = min(valid_roll_widths)
 
     # Initialize warehouse master roll stock: None/<=0 means unlimited (float('inf'))
     stock = {}
@@ -278,6 +376,7 @@ def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, re
             if not pool:
                 break
             min_pool_w = min(pool.keys())
+            total_rem_demand = sum(w * q for w, q in pool.items())
             usable_rolls = [
                 rw for rw in valid_roll_widths
                 if rw >= min_pool_w and curr["stock"].get(rw, float('inf')) > 0
@@ -288,10 +387,10 @@ def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, re
             best_roll, best, best_trials = None, None, []
             for rw in usable_rolls:
                 cands = ml_generate_candidates(rw, pool, scenario_widths, gen_model, pool_features)
-                ranked = sorted(cands, key=score_candidate)
+                ranked = sorted(cands, key=lambda c: score_candidate(c, total_rem_demand))
                 if ranked:
                     c = ranked[0]
-                    if best is None or score_candidate(c) < score_candidate(best):
+                    if best is None or score_candidate(c, total_rem_demand) < score_candidate(best, total_rem_demand):
                         best_roll, best = rw, c
                         best_trials = ranked
 
@@ -352,6 +451,7 @@ def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, re
                     continue
 
                 min_pool_w = min(pool.keys())
+                total_rem_demand = sum(w * q for w, q in pool.items())
                 usable_rolls = [
                     rw for rw in valid_roll_widths
                     if rw >= min_pool_w and state["stock"].get(rw, float('inf')) > 0
@@ -360,11 +460,11 @@ def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, re
                     completed.append(state)
                     continue
 
-                # Collect candidate actions for this state
+                # Collect candidate actions for each roll width
                 roll_actions = []
                 for rw in usable_rolls:
                     cands = ml_generate_candidates(rw, pool, scenario_widths, gen_model, pool_features)
-                    ranked = sorted(cands, key=score_candidate)
+                    ranked = sorted(cands, key=lambda c: score_candidate(c, total_rem_demand))
                     # Take top 2 distinct patterns per roll width for beam diversity
                     for c in ranked[:2]:
                         roll_actions.append((rw, c, ranked))
@@ -373,11 +473,21 @@ def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, re
                     completed.append(state)
                     continue
 
-                # Sort actions by per-roll score
-                roll_actions.sort(key=lambda item: score_candidate(item[1]))
+                # Sort actions by priority:
+                # 1. Pool-clearing candidates (finishes order run)
+                # 2. Exact zero-waste candidates
+                # 3. Overall candidate score
+                def action_priority(item):
+                    rw, c, _ = item
+                    is_clear = (c["used_mm"] == total_rem_demand)
+                    is_zero = (c["waste_mm"] == 0 or c["waste_pct"] <= 0.001)
+                    tier = 0 if is_clear else (1 if is_zero else 2)
+                    return (tier, score_candidate(c, total_rem_demand))
 
-                # Branch on the top actions (up to 3 best actions)
-                for rw, c, trials in roll_actions[:3]:
+                roll_actions.sort(key=action_priority)
+
+                # Branch on diverse actions (up to 5 actions across roll sizes)
+                for rw, c, trials in roll_actions[:5]:
                     max_repeats_orders = min(state["remaining"][w] // q for w, q in c["combo_counts"].items() if q > 0)
                     max_repeats_stock = state["stock"].get(rw, float('inf'))
                     if max_repeats_stock <= 0:
@@ -434,15 +544,20 @@ def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, re
                 completed.extend(beam)
                 break
 
-            # Prune next_beam down to beam_width
+            # Prune next_beam down to beam_width with A* heuristics
             def state_rank(s):
                 rem_mm = sum(w * q for w, q in s["remaining"].items() if q > 0)
+                future_rolls_lb = int(np.ceil(rem_mm / max_rw)) if rem_mm > 0 else 0
+                total_proj_rolls = len(s["plan"]) + future_rolls_lb
+                proj_waste = s["total_waste_mm"] + (max(0, future_rolls_lb * min_rw - rem_mm) if rem_mm > 0 else 0)
                 plan_setups = sum(len(r["cuts"]) for r in s["plan"])
                 plan_cuts = sum(sum(r["cuts"].values()) for r in s["plan"])
                 return (
-                    rem_mm,
-                    -s["zero_waste_count"],
-                    s["total_waste_mm"],
+                    rem_mm,                  # 1. Less remaining demand first
+                    total_proj_rolls,        # 2. Fewer total projected rolls (A* heuristic)
+                    proj_waste,              # 3. Lower projected total scrap mm
+                    s["total_waste_mm"],     # 4. Actual waste accumulated
+                    -s["zero_waste_count"],  # 5. More zero-waste cuts as tie-breaker
                     plan_setups,
                     plan_cuts,
                     -s["total_used_mm"]
@@ -466,13 +581,14 @@ def solve(roll_widths, orders, gen_model, pool_features, roll_inventory=None, re
         if not all_candidates:
             all_candidates = [initial_state]
 
+        # Final ranking: 100% demand fulfilled > min total rolls > min total scrap > max 0% rolls
         all_candidates.sort(key=lambda s: (
             sum(w * q for w, q in s["remaining"].items() if q > 0),
-            -s["zero_waste_count"],
+            len(s["plan"]),
             s["total_waste_mm"],
+            -s["zero_waste_count"],
             sum(len(r["cuts"]) for r in s["plan"]),
-            sum(sum(r["cuts"].values()) for r in s["plan"]),
-            len(s["plan"])
+            sum(sum(r["cuts"].values()) for r in s["plan"])
         ))
         best_state = all_candidates[0]
 

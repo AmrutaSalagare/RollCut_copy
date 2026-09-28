@@ -16,11 +16,18 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 app = Flask(__name__, static_folder="static")
 
-# Load ML models once at server startup
+# Load 1D ML models
 try:
     gen_model, _, pool_feats, _, _ = load_models()
 except Exception as e:
     gen_model, pool_feats = None, None
+
+# Load 2D ML models
+try:
+    from solver_2d import load_models as load_models_2d, solve_2d
+    gen_model_2d, scorer_model_2d, pool_feats_2d, _, scorer_feats_2d = load_models_2d()
+except Exception as e:
+    gen_model_2d, scorer_model_2d, pool_feats_2d, scorer_feats_2d = None, None, None, None
 
 
 @app.route("/")
@@ -37,8 +44,9 @@ def static_proxy(path):
 def health():
     return jsonify({
         "status": "healthy",
-        "model_loaded": gen_model is not None,
-        "version": "2.0.0"
+        "model_1d_loaded": gen_model is not None,
+        "model_2d_loaded": gen_model_2d is not None,
+        "version": "2.1.0"
     })
 
 
@@ -173,7 +181,153 @@ def optimize():
         return jsonify({"error": f"Optimization execution error: {str(ex)}"}), 500
 
 
+@app.route("/api/optimize-2d", methods=["POST"])
+def optimize_2d():
+    if gen_model_2d is None:
+        return jsonify({"error": "2D ML model is not loaded. Please verify 2D model files."}), 500
+
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({"error": "Invalid request payload. Expected JSON."}), 400
+
+    raw_rolls  = data.get("master_rolls", [])
+    raw_orders = data.get("orders", [])
+    beam_w     = int(data.get("beam_width", 16))
+
+    # Parse rolls: list of (width, length) or dicts {"width": w, "length": l, "qty": q}
+    master_rolls = []
+    inventory    = {}
+    try:
+        for r in raw_rolls:
+            if isinstance(r, dict):
+                w, l = int(r.get("width", 0)), int(r.get("length", 0))
+                q = int(r["qty"]) if "qty" in r and r["qty"] is not None and str(r["qty"]).strip() != "" else (1 if r.get("isRemnant") else None)
+            elif isinstance(r, (list, tuple)) and len(r) >= 2:
+                w, l = int(r[0]), int(r[1])
+                q = int(r[2]) if len(r) >= 3 and r[2] is not None else None
+            else:
+                continue
+            if w > 0 and l > 0:
+                master_rolls.append((w, l))
+                if q is not None and q > 0:
+                    inventory[(w, l)] = q
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid master roll specifications."}), 400
+
+    if not master_rolls:
+        return jsonify({"error": "At least one valid master roll (width, length) is required."}), 400
+
+    # Parse orders: list of (width, length, qty) or dicts {"width": w, "length": l, "quantity": q}
+    orders_dict = {}
+    try:
+        for o in raw_orders:
+            if isinstance(o, dict):
+                w = int(o.get("width", 0))
+                l = int(o.get("length", 0))
+                q = int(o.get("quantity", o.get("qty", 0)))
+            elif isinstance(o, (list, tuple)) and len(o) >= 3:
+                w, l, q = int(o[0]), int(o[1]), int(o[2])
+            else:
+                continue
+            if w > 0 and l > 0 and q > 0:
+                key = (w, l)
+                orders_dict[key] = orders_dict.get(key, 0) + q
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid customer orders format."}), 400
+
+    orders = [(w, l, q) for (w, l), q in orders_dict.items()]
+    if not orders:
+        return jsonify({"error": "At least one valid customer order is required."}), 400
+
+    try:
+        import solver_2d
+        plan, remaining_stock = solver_2d.solve_2d(
+            master_rolls, orders, gen_model_2d, pool_feats_2d,
+            scorer_model=scorer_model_2d, scorer_features=scorer_feats_2d,
+            roll_inventory=inventory if inventory else None,
+            beam_width=beam_w,
+            return_inventory=True
+        )
+
+        formatted_plan = []
+        for r in plan:
+            formatted_secs = []
+            for s in r["sections"]:
+                cuts_list = [
+                    {"width": w, "length": l, "quantity": q}
+                    for (w, l), q in sorted(s["assignment"].items(), reverse=True)
+                ]
+                formatted_secs.append({
+                    "section_length":        s["section_length"],
+                    "used_width_mm":         s["used_width_mm"],
+                    "width_waste_mm":        s["width_waste_mm"],
+                    "used_area":             s["used_area"],
+                    "section_area":          s["section_area"],
+                    "waste_area":            s["waste_area"],
+                    "waste_area_pct":        s["waste_area_pct"],
+                    "ml_pred_waste":         s.get("ml_pred_waste", 0.0),
+                    "is_width_remnant":      s.get("is_width_remnant", s["width_waste_mm"] >= 150),
+                    "width_remnant_mm":      s.get("width_remnant_mm", s["width_waste_mm"] if s["width_waste_mm"] >= 150 else 0),
+                    "width_remnant_length":  s.get("width_remnant_length", s["section_length"] if s["width_waste_mm"] >= 150 else 0),
+                    "width_remnant_area":    s.get("width_remnant_area", (s["width_waste_mm"] * s["section_length"]) if s["width_waste_mm"] >= 150 else 0),
+                    "candidates_explored":   s.get("candidates_explored", []),
+                    "cuts":                  cuts_list,
+                })
+            formatted_plan.append({
+                "roll_num":                    r["roll_num"],
+                "master_width":                r["master_width"],
+                "master_length":               r["master_length"],
+                "roll_area":                   r["roll_area"],
+                "length_used":                 r["length_used"],
+                "remnant_length":              r["remnant_length"],
+                "remnant_area":                r["remnant_area"],
+                "total_width_remnant_area":    r.get("total_width_remnant_area", 0),
+                "total_reusable_area":         r.get("total_reusable_area", r["remnant_area"]),
+                "sections":                    formatted_secs,
+                "candidates_explored":          r.get("candidates_explored", []),
+                "total_used_area":             r["total_used_area"],
+                "section_waste_area":          r["section_waste_area"],
+                "total_waste_area":            r["total_waste_area"],
+                "slitting_eff_pct":            r["slitting_eff_pct"],
+                "overall_roll_utilization_pct": r["efficiency_pct"],
+            })
+
+        total_product_cut = sum(r["total_used_area"] for r in plan)
+        total_roll_area   = sum(r["roll_area"] for r in plan)
+        total_slit_area   = sum(r["master_width"] * r["length_used"] for r in plan)
+        total_gross_trim  = sum(r["section_waste_area"] for r in plan)
+        total_length_rem  = sum(r["remnant_area"] for r in plan)
+        total_width_rem   = sum(r.get("total_width_remnant_area", 0) for r in plan)
+        total_reusable    = total_length_rem + total_width_rem
+        net_scrap         = max(0, total_gross_trim - total_width_rem)
+        net_scrap_pct     = round(net_scrap / total_roll_area * 100, 2) if total_roll_area else 0.0
+
+        return jsonify({
+            "summary": {
+                "rolls_used":                  len(plan),
+                "total_product_cut_area":      total_product_cut,
+                "total_roll_area_allocated":   total_roll_area,
+                "gross_trim_waste":            total_gross_trim,
+                "total_slitting_trim_waste":   total_gross_trim,
+                "total_reusable_remnant":      total_reusable,
+                "total_length_remnant":        total_length_rem,
+                "total_width_remnant":         total_width_rem,
+                "net_scrap_area":              net_scrap,
+                "net_scrap_pct":               net_scrap_pct,
+                "slitting_efficiency_pct":     round(total_product_cut / total_slit_area * 100, 2) if total_slit_area else 0.0,
+                "overall_roll_utilization_pct": round(total_product_cut / total_roll_area * 100, 2) if total_roll_area else 0.0,
+            },
+            "plan": formatted_plan,
+            "remaining_inventory": {
+                f"{w}_{l}": (q if q < float("inf") else None)
+                for (w, l), q in remaining_stock.items()
+            }
+        })
+    except Exception as ex:
+        return jsonify({"error": f"2D Optimization error: {str(ex)}"}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f" * RollCut OS server running on http://localhost:{port} (Press CTRL+C to quit)", flush=True)
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=True, use_reloader=False)

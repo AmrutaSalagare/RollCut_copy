@@ -10,7 +10,7 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=2.2">
 </head>
 
 <body>
@@ -28,7 +28,17 @@
         </div>
         <div>
           <h1 class="brand-title">RollCut OS</h1>
-          <span class="brand-subtitle">1D Cutting Stock Optimization Engine &bull; ML-Driven</span>
+          <span class="brand-subtitle" id="brand-subtitle">1D Cutting Stock Optimization Engine &bull; ML-Driven</span>
+        </div>
+      </div>
+      <div class="mode-switch-container">
+        <div class="mode-switch" id="mode-switch" role="tablist">
+          <button type="button" class="mode-btn active" id="btn-mode-1d" role="tab" aria-selected="true" title="1D Cutting Stock: Width slitting across master rolls">
+            <span class="mode-tag">1D</span> Width Slitting
+          </button>
+          <button type="button" class="mode-btn" id="btn-mode-2d" role="tab" aria-selected="false" title="2D Cutting Stock: Width &times; Length multi-slitting & sheeting">
+            <span class="mode-tag">2D</span> Width &times; Length
+          </button>
         </div>
       </div>
       <div class="header-actions">
@@ -116,7 +126,7 @@
         <div class="panel-header">
           <div class="panel-title-group">
             <h2 class="panel-title">1. Master Roll Inventory</h2>
-            <span class="panel-note">Available raw stock roll widths in warehouse</span>
+            <span class="panel-note" id="roll-panel-note">Available raw stock roll widths in warehouse</span>
           </div>
           <div class="order-actions-top">
             <button type="button" id="btn-clear-rolls" class="btn btn-text btn-sm danger"
@@ -126,12 +136,13 @@
 
         <!-- Master Roll Sizes Chip List -->
         <div class="form-group">
-          <label class="field-label">Available Master Roll Sizes (mm)</label>
+          <label class="field-label" id="roll-field-label">Available Master Roll Sizes (mm)</label>
           <div class="chips-container" id="roll-chips-container">
             <!-- Chips rendered dynamically -->
           </div>
           <div class="add-chip-row">
             <input type="number" id="input-new-roll" placeholder="Width in mm (e.g. 3000)" min="100" step="10" style="flex: 2;">
+            <input type="number" id="input-new-roll-len" placeholder="Length in meters (e.g. 5000)" min="1" step="10" style="flex: 2; display: none;" title="Master roll length in meters">
             <input type="number" id="input-new-roll-qty" placeholder="Stock Qty (∞)" min="1" step="1" style="flex: 1.2;" title="Available rolls in warehouse (leave blank for unlimited)">
             <button type="button" id="btn-add-roll" class="btn btn-secondary btn-sm">Add Stock</button>
           </div>
@@ -142,7 +153,7 @@
         <div class="panel-header">
           <div class="panel-title-group">
             <h2 class="panel-title">2. Customer Demand Specification</h2>
-            <span class="panel-note">Cut widths and required quantities</span>
+            <span class="panel-note" id="order-panel-note">Cut widths and required quantities</span>
           </div>
           <div class="order-actions-top">
             <button type="button" id="btn-import-csv" class="btn btn-text btn-sm"
@@ -167,8 +178,9 @@
           <table class="data-table" id="orders-table">
             <thead>
               <tr>
-                <th style="width: 50%;">Width (mm)</th>
-                <th style="width: 35%;">Quantity (pcs)</th>
+                <th id="th-order-w" style="width: 50%;">Width (mm)</th>
+                <th id="th-order-l" style="width: 30%; display: none;">Length (m)</th>
+                <th id="th-order-q" style="width: 35%;">Quantity (pcs)</th>
                 <th style="width: 15%; text-align: center;">Action</th>
               </tr>
             </thead>
@@ -195,8 +207,9 @@
             <span id="btn-solve-text">Calculate Cutting Plan</span>
             <div id="btn-spinner" class="spinner" style="display: none;"></div>
           </button>
-          <button type="button" id="btn-reoptimize" class="btn btn-secondary" style="display: none; white-space: nowrap;" title="Re-plan remaining unfulfilled orders with available stock">
-            ↻ Re-Plan Remaining
+          <button type="button" id="btn-reoptimize" class="btn btn-secondary" style="display: none; white-space: nowrap; align-items: center; justify-content: center; gap: 6px;" title="Re-plan remaining unfulfilled orders with available stock">
+            <span id="btn-reoptimize-text">↻ Re-Plan Remaining</span>
+            <div id="btn-reoptimize-spinner" class="spinner" style="display: none; width: 14px; height: 14px; margin: 0; border-width: 2px;"></div>
           </button>
         </div>
 
@@ -210,9 +223,35 @@
           <span class="panel-note" id="plan-status-note">Awaiting calculation</span>
         </div>
 
+        <!-- Print & Image Inclusion Controls -->
+        <div id="export-options-bar" class="export-options-bar" style="display: none;">
+          <div class="export-options-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20h9"></path>
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+            </svg>
+            <span>Print & Image Details:</span>
+          </div>
+          <div class="export-options-checks">
+            <label class="export-check-item" title="Include all explored combination trials in print and exported image">
+              <input type="checkbox" id="chk-inc-trials">
+              <span class="chk-text">Combination Trials</span>
+            </label>
+            <label class="export-check-item" title="Include customer orders and backlog requirements">
+              <input type="checkbox" id="chk-inc-orders" checked>
+              <span class="chk-text">Customer Orders</span>
+            </label>
+            <label class="export-check-item" title="Include scrap metrics and remnant banners">
+              <input type="checkbox" id="chk-inc-scrap" checked>
+              <span class="chk-text">Scrap & Remnants</span>
+            </label>
+          </div>
+          <span class="export-options-note">Excel export always retains 100% all details</span>
+        </div>
+
         <!-- Placeholder State -->
-        <div id="empty-state" class="empty-state">
-          <div class="empty-icon">
+        <div id="empty-state" class="empty-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; margin: auto; padding: 60px 24px; width: 100%;">
+          <div class="empty-icon" style="margin: 0 auto 16px auto; display: flex; align-items: center; justify-content: center;">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
               stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
@@ -220,8 +259,8 @@
               <line x1="9" y1="21" x2="9" y2="9"></line>
             </svg>
           </div>
-          <h3>No Cutting Plan Generated Yet</h3>
-          <p>Define master roll inventory and order requirements on the left, then click <strong>Calculate Cutting
+          <h3 style="text-align: center; margin: 0 auto 8px auto; width: 100%;">No Cutting Plan Generated Yet</h3>
+          <p style="text-align: center; margin: 0 auto; max-width: 440px; line-height: 1.6; color: var(--text-muted); width: 100%;">Define master roll inventory and order requirements on the left, then click <strong>Calculate Cutting
               Plan</strong> to generate zero-waste patterns.</p>
         </div>
 
@@ -236,7 +275,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=2.8"></script>
 </body>
 
 </html>
