@@ -301,6 +301,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function syncRemnantButtons2D() {
     document.querySelectorAll(".btn-remnant-2d").forEach((btn) => {
+      if (btn.classList.contains("btn-remnant-consumed") || btn.disabled) return;
       const w = parseInt(btn.getAttribute("data-w"), 10);
       const l = parseInt(btn.getAttribute("data-l"), 10);
       const sourceUid = btn.getAttribute("data-source-uid");
@@ -1327,36 +1328,18 @@ document.addEventListener("DOMContentLoaded", () => {
         const combinedPlan = [...completedRolls, ...data.plan];
         combinedPlan.forEach((r, idx) => { r.roll_num = idx + 1; });
 
-        const totalCutArea = combinedPlan.reduce((acc, r) => acc + (r.total_used_area || 0), 0);
-        const totalAllocArea = combinedPlan.reduce((acc, r) => acc + (r.roll_area || 0), 0);
-        const totalSlitArea = combinedPlan.reduce((acc, r) => acc + (r.master_width * r.length_used), 0);
-        const totalTrimWaste = combinedPlan.reduce((acc, r) => acc + (r.section_waste_area || 0), 0);
-        const totalLengthRem = combinedPlan.reduce((acc, r) => acc + (r.remnant_area || 0), 0);
-        const totalWidthRem = combinedPlan.reduce((acc, r) => acc + (r.total_width_remnant_area || 0), 0);
-        const totalReusable = totalLengthRem + totalWidthRem;
-        const netScrap = Math.max(0, combinedPlan.reduce((acc, r) => acc + (r.total_waste_area || 0), 0) - totalReusable);
-
         latestPlanData2D = {
-          summary: {
-            rolls_used: combinedPlan.length,
-            total_product_cut_area: totalCutArea,
-            total_roll_area_allocated: totalAllocArea,
-            total_slitting_trim_waste: totalTrimWaste,
-            total_reusable_remnant: totalReusable,
-            total_length_remnant: totalLengthRem,
-            total_width_remnant: totalWidthRem,
-            net_scrap_area: netScrap,
-            net_scrap_pct: roundToTwo((netScrap / (totalAllocArea || 1)) * 100),
-            slitting_efficiency_pct: totalSlitArea ? roundToTwo((totalCutArea / totalSlitArea) * 100) : 0,
-            overall_roll_utilization_pct: totalAllocArea ? roundToTwo((totalCutArea / totalAllocArea) * 100) : 0,
-          },
+          summary: computePlanSummary2D(combinedPlan),
           plan: combinedPlan
         };
       } else {
         completedRollIds2D.clear();
         assignRollUids(data.plan);
         data.plan.forEach((r, idx) => { r.roll_num = idx + 1; });
-        latestPlanData2D = data;
+        latestPlanData2D = {
+          summary: computePlanSummary2D(data.plan),
+          plan: data.plan
+        };
       }
 
       if (latestPlanData2D && latestPlanData2D.plan) {
@@ -1389,15 +1372,88 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  function computePlanSummary2D(combinedPlan) {
+    let totalCutArea = 0;
+    let totalRawAllocArea = 0;
+    let rawMasterRollsCount = 0;
+
+    const remnantsProduced = [];
+
+    combinedPlan.forEach((r) => {
+      totalCutArea += (r.total_used_area || 0);
+
+      // Check if this roll was cut from a remnant produced by an earlier roll
+      const consumedIdx = remnantsProduced.findIndex(rem =>
+        !rem.consumed && rem.width === r.master_width && rem.length === r.master_length
+      );
+
+      if (consumedIdx !== -1) {
+        remnantsProduced[consumedIdx].consumed = true;
+      } else {
+        totalRawAllocArea += (r.roll_area || (r.master_width * r.master_length));
+        rawMasterRollsCount += 1;
+      }
+
+      if (r.remnant_length >= 10 && r.remnant_area > 0) {
+        remnantsProduced.push({
+          width: r.master_width,
+          length: r.remnant_length,
+          area: r.remnant_area,
+          consumed: false
+        });
+      }
+
+      if (r.sections) {
+        r.sections.forEach((sec) => {
+          if (sec.width_waste_mm >= 150 && sec.section_length >= 10) {
+            remnantsProduced.push({
+              width: sec.width_waste_mm,
+              length: sec.section_length,
+              area: sec.width_waste_mm * sec.section_length,
+              consumed: false
+            });
+          }
+        });
+      }
+    });
+
+    if (totalRawAllocArea === 0 && combinedPlan.length > 0) {
+      totalRawAllocArea = combinedPlan.reduce((acc, r) => acc + (r.roll_area || 0), 0);
+    }
+
+    const activeRemnants = remnantsProduced.filter(rem => !rem.consumed);
+    const totalActiveRemArea = activeRemnants.reduce((acc, rem) => acc + rem.area, 0);
+
+    const netScrap = Math.max(0, totalRawAllocArea - totalCutArea - totalActiveRemArea);
+    const netScrapPct = roundToTwo((netScrap / (totalRawAllocArea || 1)) * 100);
+    const materialYieldPct = roundToTwo((totalCutArea / (totalRawAllocArea || 1)) * 100);
+    const overallUtilPct = roundToTwo(((totalCutArea + totalActiveRemArea) / (totalRawAllocArea || 1)) * 100);
+
+    return {
+      rolls_used: combinedPlan.length,
+      raw_master_rolls_count: rawMasterRollsCount || combinedPlan.length,
+      total_product_cut_area: totalCutArea,
+      total_roll_area_allocated: totalRawAllocArea,
+      total_reusable_remnant: totalActiveRemArea,
+      net_scrap_area: netScrap,
+      net_scrap_pct: netScrapPct,
+      slitting_efficiency_pct: materialYieldPct,
+      overall_roll_utilization_pct: overallUtilPct
+    };
+  }
+
   function renderPlanResults2D(data) {
     const { summary, plan } = data;
 
     // 1. Populate KPI Bar
     kpiSection.style.display = "grid";
     kpiYield.textContent = `${summary.slitting_efficiency_pct}%`;
-    kpiYieldSub.textContent = "Slitting run efficiency";
+    kpiYieldSub.textContent = "Overall material yield";
 
-    kpiRolls.textContent = `${summary.rolls_used} Rolls`;
+    const rollsLabel = (summary.raw_master_rolls_count && summary.raw_master_rolls_count !== summary.rolls_used)
+      ? `${summary.raw_master_rolls_count} Master Rolls (${summary.rolls_used} total)`
+      : `${summary.rolls_used} Rolls`;
+    kpiRolls.textContent = rollsLabel;
     const allocAreaM2 = (summary.total_roll_area_allocated / 1000).toFixed(2);
     kpiCapacity.textContent = `Allocated: ${allocAreaM2} m²`;
 
@@ -1541,36 +1597,64 @@ document.addEventListener("DOMContentLoaded", () => {
         let buttonsHtml = "";
         let descText = "";
 
+        // Check if length remnant was consumed by a subsequent roll in the plan
+        const consumingLengthRoll = hasLengthRem
+          ? plan.find((r) => r.roll_num > roll.roll_num && r.master_width === roll.master_width && r.master_length === roll.remnant_length)
+          : null;
+
+        // Check if width offcut was consumed by a subsequent roll in the plan
+        const consumingWidthRoll = majorWidthRem
+          ? plan.find((r) => r.roll_num > roll.roll_num && r.master_width === majorWidthRem.width && r.master_length === majorWidthRem.length)
+          : null;
+
+        const inStockL = masterRolls2D.some((r) => r.sourceRollUid === roll.uid && r.width === roll.master_width && r.length === roll.remnant_length);
+        const inStockW = majorWidthRem && masterRolls2D.some((r) => r.sourceRollUid === roll.uid && r.width === majorWidthRem.width && r.length === majorWidthRem.length);
+
         if (hasLengthRem && majorWidthRem) {
           const lRemArea = ((roll.master_width * roll.remnant_length) / 1000).toFixed(2);
-          const inStockL = masterRolls2D.some((r) => r.sourceRollUid === roll.uid && r.width === roll.master_width && r.length === roll.remnant_length);
-          const inStockW = masterRolls2D.some((r) => r.sourceRollUid === roll.uid && r.width === majorWidthRem.width && r.length === majorWidthRem.length);
           descText = `Reusable Remnants: Length (${roll.master_width.toLocaleString()} mm &times; ${roll.remnant_length.toLocaleString()} m) and Side Offcut (${majorWidthRem.width.toLocaleString()} mm &times; ${majorWidthRem.length.toLocaleString()} m)`;
-          buttonsHtml = `
-            <button type="button" class="btn-remnant-2d ${inStockL ? 'btn-remnant-added' : ''}" data-w="${roll.master_width}" data-l="${roll.remnant_length}" data-source-uid="${roll.uid}">
+
+          let btnL = "";
+          if (consumingLengthRoll) {
+            btnL = `<button type="button" class="btn-remnant-2d btn-remnant-consumed" disabled title="Utilized to cut Roll #${consumingLengthRoll.roll_num}">✓ Consumed in Roll #${consumingLengthRoll.roll_num}</button>`;
+          } else {
+            btnL = `<button type="button" class="btn-remnant-2d ${inStockL ? 'btn-remnant-added' : ''}" data-w="${roll.master_width}" data-l="${roll.remnant_length}" data-source-uid="${roll.uid}">
               ${inStockL ? '✓ Length in Stock' : `+ Add Length (${roll.master_width}mm × ${roll.remnant_length}m)`}
-            </button>
-            <button type="button" class="btn-remnant-2d btn-width-remnant ${inStockW ? 'btn-remnant-added' : ''}" data-w="${majorWidthRem.width}" data-l="${majorWidthRem.length}" data-source-uid="${roll.uid}">
+            </button>`;
+          }
+
+          let btnW = "";
+          if (consumingWidthRoll) {
+            btnW = `<button type="button" class="btn-remnant-2d btn-width-remnant btn-remnant-consumed" disabled title="Utilized to cut Roll #${consumingWidthRoll.roll_num}">✓ Consumed in Roll #${consumingWidthRoll.roll_num}</button>`;
+          } else {
+            btnW = `<button type="button" class="btn-remnant-2d btn-width-remnant ${inStockW ? 'btn-remnant-added' : ''}" data-w="${majorWidthRem.width}" data-l="${majorWidthRem.length}" data-source-uid="${roll.uid}">
               ${inStockW ? '✓ Offcut in Stock' : `+ Add Offcut (${majorWidthRem.width}mm × ${majorWidthRem.length}m)`}
-            </button>
-          `;
+            </button>`;
+          }
+          buttonsHtml = btnL + btnW;
         } else if (hasLengthRem) {
           const lRemArea = ((roll.master_width * roll.remnant_length) / 1000).toFixed(2);
-          const inStock = masterRolls2D.some((r) => r.sourceRollUid === roll.uid && r.width === roll.master_width && r.length === roll.remnant_length);
           descText = `Uncut Roll Remnant: <strong>${roll.master_width.toLocaleString()} mm &times; ${roll.remnant_length.toLocaleString()} m</strong> (${lRemArea} m²)`;
-          buttonsHtml = `
-            <button type="button" class="btn-remnant-2d ${inStock ? 'btn-remnant-added' : ''}" data-w="${roll.master_width}" data-l="${roll.remnant_length}" data-source-uid="${roll.uid}">
-              ${inStock ? '✓ Queued in Stock' : `+ Add Remnant to Stock (${roll.master_width}mm × ${roll.remnant_length}m)`}
-            </button>
-          `;
+          if (consumingLengthRoll) {
+            buttonsHtml = `<button type="button" class="btn-remnant-2d btn-remnant-consumed" disabled title="Utilized to cut Roll #${consumingLengthRoll.roll_num}">✓ Consumed in Roll #${consumingLengthRoll.roll_num} (${roll.master_width}mm × ${roll.remnant_length}m)</button>`;
+          } else {
+            buttonsHtml = `
+              <button type="button" class="btn-remnant-2d ${inStockL ? 'btn-remnant-added' : ''}" data-w="${roll.master_width}" data-l="${roll.remnant_length}" data-source-uid="${roll.uid}">
+                ${inStockL ? '✓ Queued in Stock' : `+ Add Remnant to Stock (${roll.master_width}mm × ${roll.remnant_length}m)`}
+              </button>
+            `;
+          }
         } else if (majorWidthRem) {
-          const inStock = masterRolls2D.some((r) => r.sourceRollUid === roll.uid && r.width === majorWidthRem.width && r.length === majorWidthRem.length);
           descText = `Reusable Side Offcut: <strong>${majorWidthRem.width.toLocaleString()} mm &times; ${majorWidthRem.length.toLocaleString()} m</strong> (${majorWidthRem.area} m²)`;
-          buttonsHtml = `
-            <button type="button" class="btn-remnant-2d btn-width-remnant ${inStock ? 'btn-remnant-added' : ''}" data-w="${majorWidthRem.width}" data-l="${majorWidthRem.length}" data-source-uid="${roll.uid}">
-              ${inStock ? '✓ Queued in Stock' : `+ Add Remnant to Stock (${majorWidthRem.width}mm × ${majorWidthRem.length}m)`}
-            </button>
-          `;
+          if (consumingWidthRoll) {
+            buttonsHtml = `<button type="button" class="btn-remnant-2d btn-width-remnant btn-remnant-consumed" disabled title="Utilized to cut Roll #${consumingWidthRoll.roll_num}">✓ Consumed in Roll #${consumingWidthRoll.roll_num} (${majorWidthRem.width}mm × ${majorWidthRem.length}m)</button>`;
+          } else {
+            buttonsHtml = `
+              <button type="button" class="btn-remnant-2d btn-width-remnant ${inStockW ? 'btn-remnant-added' : ''}" data-w="${majorWidthRem.width}" data-l="${majorWidthRem.length}" data-source-uid="${roll.uid}">
+                ${inStockW ? '✓ Queued in Stock' : `+ Add Remnant to Stock (${majorWidthRem.width}mm × ${majorWidthRem.length}m)`}
+              </button>
+            `;
+          }
         }
 
         remnantBannerHtml = `

@@ -125,7 +125,10 @@ def build_ml_windows(pool, master_width, length_remaining, section_length, num_s
     Constructs multi-perspective windows so all active items in the pool
     are evaluated by the ML model without arbitrary exclusion.
     """
-    active = [(w, l, q) for (w, l), q in pool.items() if q > 0 and l <= section_length and w <= master_width]
+    active = [
+        (w, l, q) for (w, l), q in pool.items()
+        if q > 0 and l <= section_length and (section_length - l) / (section_length or 1) <= 0.15 and w <= master_width
+    ]
     if not active:
         return []
 
@@ -236,13 +239,10 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
         for (pw, pl), total_q in pool.items():
             if pl > sec_len or pw > gap or total_q <= 0:
                 continue
-            mult = sec_len // pl
-            if mult < 1:
+            # Only allow close length matching in the same run to prevent length mixing
+            if (sec_len - pl) / (sec_len or 1) > 0.15:
                 continue
-            mod = sec_len % pl
-            if mod > 0 and (mod / sec_len) > 0.30:
-                continue
-            needed = math.ceil(total_q / mult)
+            needed = total_q
             already = curr.get((pw, pl), 0)
             can_add = needed - already
             if can_add > 0:
@@ -280,7 +280,10 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
         filled = iterative_gap_fill(trimmed, sec_len)
 
         # Build clean assignment and calculate fulfilled customer rolls
-        valid_knives = {k: count for k, count in filled.items() if count > 0 and k[1] <= sec_len}
+        valid_knives = {
+            k: count for k, count in filled.items()
+            if count > 0 and k[1] <= sec_len and (sec_len - k[1]) / (sec_len or 1) <= 0.15
+        }
         if not valid_knives:
             return
 
@@ -300,8 +303,7 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
         assignment = {}
         used_area = 0
         for (w, l), k in valid_knives.items():
-            mult = sec_len // l
-            q_cut = min(pool.get((w, l), 0), k * mult)
+            q_cut = min(pool.get((w, l), 0), k)
             assignment[(w, l)] = q_cut
             used_area += (w * l * q_cut)
 
@@ -364,9 +366,8 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
             base_knives = []
             for i in range(num_slots):
                 w, l, q = slots[i]
-                if w > 0 and l > 0 and l <= s_len:
-                    mult = s_len // l
-                    max_k = math.ceil(q / mult) if mult > 0 else 0
+                if w > 0 and l > 0 and l <= s_len and (s_len - l) / (s_len or 1) <= 0.15:
+                    max_k = min(q, master_width // w)
                     pred_k = int(min(max(round(float(raw_preds[i])), 0), max_k))
                 else:
                     pred_k = 0
@@ -383,10 +384,9 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
             # 2. Local +/-1 and +/-2 variations around ML prediction
             for i in range(num_slots):
                 w, l, q = slots[i]
-                if w <= 0 or l <= 0 or l > s_len:
+                if w <= 0 or l <= 0 or l > s_len or (s_len - l) / (s_len or 1) > 0.15:
                     continue
-                mult = s_len // l
-                max_k = math.ceil(q / mult) if mult > 0 else 0
+                max_k = min(q, master_width // w)
                 for delta in (-1, 1):
                     v = dict(ml_knife_map)
                     k = (w, l)
@@ -400,15 +400,9 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
         # 3. Multi-order complementary combinations: explore pairing high-demand primary items with fillers
         sorted_active = sorted(active, key=lambda x: -x[0])
         for idx, (pw, pl, pq) in enumerate(sorted_active):
-            if pl > s_len:
+            if pl > s_len or (s_len - pl) / (s_len or 1) > 0.15:
                 continue
-            mult = s_len // pl
-            if mult < 1:
-                continue
-            mod = s_len % pl
-            if mod > 0 and (mod / s_len) > 0.30:
-                continue
-            max_k = min(math.ceil(pq / mult), master_width // pw)
+            max_k = min(pq, master_width // pw)
             for k_start in range(max_k, max(0, max_k - 3), -1):
                 if k_start <= 0:
                     continue
@@ -418,13 +412,9 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
         avail_units = {}
         for pw, pl, pq in active:
             if pl <= s_len and pq > 0:
-                mult = s_len // pl
-                if mult >= 1:
-                    mod = s_len % pl
-                    if mod > 0 and (mod / s_len) > 0.30:
-                        continue
-                    knives_needed = math.ceil(pq / mult)
-                    avail_units[(pw, pl)] = min(knives_needed, master_width // pw)
+                if (s_len - pl) / (s_len or 1) > 0.15:
+                    continue
+                avail_units[(pw, pl)] = min(pq, master_width // pw)
 
         dp_full = {0: {}}
         for (pw, pl), max_k in sorted(avail_units.items(), key=lambda x: -x[0][0]):
@@ -499,7 +489,10 @@ def score_section(cand):
 
     width_trim_penalty = (w_mm / mw) * 100.0
     ml_blend = max(0.0, raw_ml) * 0.05
-    effective_scrap = round(geo_pct + width_trim_penalty + ml_blend, 4)
+    
+    # Preference for pure-length sections (e.g. all 8000m or all 4000m) to prevent fragmented cross-length cutting
+    is_pure_len = 0.0 if all(l == cand["section_length"] for (w, l) in cand.get("assignment", {}).keys()) else 2.0
+    effective_scrap = round(geo_pct + width_trim_penalty + ml_blend + is_pure_len, 4)
 
     return (effective_scrap, -u_w, -u_area)
 

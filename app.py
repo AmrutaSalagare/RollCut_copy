@@ -241,6 +241,8 @@ def optimize_2d():
 
     try:
         import solver_2d
+        import importlib
+        importlib.reload(solver_2d)
         plan, remaining_stock = solver_2d.solve_2d(
             master_rolls, orders, gen_model_2d, pool_feats_2d,
             scorer_model=scorer_model_2d, scorer_features=scorer_feats_2d,
@@ -293,29 +295,63 @@ def optimize_2d():
             })
 
         total_product_cut = sum(r["total_used_area"] for r in plan)
-        total_roll_area   = sum(r["roll_area"] for r in plan)
-        total_slit_area   = sum(r["master_width"] * r["length_used"] for r in plan)
-        total_gross_trim  = sum(r["section_waste_area"] for r in plan)
-        total_length_rem  = sum(r["remnant_area"] for r in plan)
-        total_width_rem   = sum(r.get("total_width_remnant_area", 0) for r in plan)
-        total_reusable    = total_length_rem + total_width_rem
-        net_scrap         = max(0, total_gross_trim - total_width_rem)
-        net_scrap_pct     = round(net_scrap / total_roll_area * 100, 2) if total_roll_area else 0.0
+
+        # Track parent vs child rolls to prevent double-counting of remnants
+        remnants_produced = []
+        raw_allocated_area = 0
+        raw_rolls_count = 0
+
+        for r in plan:
+            mw, ml = r["master_width"], r["master_length"]
+            consumed = False
+            for rem in remnants_produced:
+                if not rem["consumed"] and rem["width"] == mw and rem["length"] == ml:
+                    rem["consumed"] = True
+                    consumed = True
+                    break
+
+            if not consumed:
+                raw_allocated_area += r["roll_area"]
+                raw_rolls_count += 1
+
+            if r["remnant_length"] >= 10 and r["remnant_area"] > 0:
+                remnants_produced.append({
+                    "width": mw,
+                    "length": r["remnant_length"],
+                    "area": r["remnant_area"],
+                    "consumed": False
+                })
+
+            for s in r["sections"]:
+                if s["width_waste_mm"] >= 150 and s["section_length"] >= 10:
+                    remnants_produced.append({
+                        "width": s["width_waste_mm"],
+                        "length": s["section_length"],
+                        "area": s["width_waste_mm"] * s["section_length"],
+                        "consumed": False
+                    })
+
+        if raw_allocated_area == 0 and plan:
+            raw_allocated_area = sum(r["roll_area"] for r in plan)
+
+        active_remnants = [rem for rem in remnants_produced if not rem["consumed"]]
+        total_active_remnant = sum(rem["area"] for rem in active_remnants)
+        net_scrap = max(0, raw_allocated_area - total_product_cut - total_active_remnant)
+        net_scrap_pct = round(net_scrap / (raw_allocated_area or 1) * 100, 2)
+        material_yield_pct = round(total_product_cut / (raw_allocated_area or 1) * 100, 2)
+        overall_utilization_pct = round((total_product_cut + total_active_remnant) / (raw_allocated_area or 1) * 100, 2)
 
         return jsonify({
             "summary": {
                 "rolls_used":                  len(plan),
+                "raw_master_rolls_count":      raw_rolls_count or len(plan),
                 "total_product_cut_area":      total_product_cut,
-                "total_roll_area_allocated":   total_roll_area,
-                "gross_trim_waste":            total_gross_trim,
-                "total_slitting_trim_waste":   total_gross_trim,
-                "total_reusable_remnant":      total_reusable,
-                "total_length_remnant":        total_length_rem,
-                "total_width_remnant":         total_width_rem,
+                "total_roll_area_allocated":   raw_allocated_area,
+                "total_reusable_remnant":      total_active_remnant,
                 "net_scrap_area":              net_scrap,
                 "net_scrap_pct":               net_scrap_pct,
-                "slitting_efficiency_pct":     round(total_product_cut / total_slit_area * 100, 2) if total_slit_area else 0.0,
-                "overall_roll_utilization_pct": round(total_product_cut / total_roll_area * 100, 2) if total_roll_area else 0.0,
+                "slitting_efficiency_pct":     material_yield_pct,
+                "overall_roll_utilization_pct": overall_utilization_pct,
             },
             "plan": formatted_plan,
             "remaining_inventory": {

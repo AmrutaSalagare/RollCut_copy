@@ -1728,6 +1728,20 @@ input[type="number"]:focus, input[type="text"]:focus {
   color: #ffffff;
 }
 
+.btn-remnant-2d.btn-remnant-consumed {
+  background-color: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #64748b;
+  cursor: default;
+  opacity: 0.9;
+}
+
+[data-theme="dark"] .btn-remnant-2d.btn-remnant-consumed {
+  background-color: #1e293b;
+  border-color: #334155;
+  color: #94a3b8;
+}
+
 /* Width Remnant (Side Offcut Roll) Banner */
 .remnant-banner-2d.width-remnant-banner {
   background-color: rgba(37, 99, 235, 0.08);
