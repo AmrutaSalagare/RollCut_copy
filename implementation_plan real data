@@ -66,3 +66,7 @@ If approved to start Phase 1, we will verify by:
 1.  **Tolerance:** Running a known historical order batch with 0% tolerance (current baseline) vs. 5% tolerance and measuring the exact reduction in `total_waste`.
 2.  **Defect Avoidance:** Simulating a defect in the middle of a master roll and verifying the solver successfully splits orders around it without crashing.
 3.  **Batch Intelligence:** Comparing the overall efficiency (%) of the new beam search logic against the legacy greedy logic on a 20-order test pool.
+
+
+## CHANGES
+

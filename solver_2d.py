@@ -38,6 +38,12 @@ def get_num_slots(pool_features=None, target_cols=None):
 
 def load_models(path=MODEL_PATH):
     p = joblib.load(path)
+    # The saved MultiOutputRegressor has n_jobs=-1, which makes every predict()
+    # pickle all sub-models into worker processes (very slow on Windows).
+    # Predict batches are small, so run them in-process instead.
+    gen = p["combo_generator_2d"]
+    if hasattr(gen, "n_jobs"):
+        gen.n_jobs = 1
     return (
         p["combo_generator_2d"],
         p.get("waste_scorer_2d"),
@@ -45,6 +51,39 @@ def load_models(path=MODEL_PATH):
         p.get("target_cols", []),
         p.get("scorer_features", []),
     )
+
+
+_BOOSTERS = {}
+
+
+def _boosters(model):
+    """Raw single-threaded XGBoost boosters behind a model (one per output), or None.
+    Calling them directly skips the sklearn wrapper's per-call bookkeeping, which
+    cost more than the prediction itself for the small batches the solver sends."""
+    key = id(model)
+    if key not in _BOOSTERS:
+        try:
+            ests = getattr(model, "estimators_", None) or [model]
+            bs = [e.get_booster() for e in ests]
+            for b in bs:
+                b.set_param({"nthread": 1})
+            _BOOSTERS[key] = (model, bs)
+        except Exception:
+            _BOOSTERS[key] = (model, None)
+    return _BOOSTERS[key][1]
+
+
+def _fast_predict(model, X):
+    """Same output as model.predict() on a DataFrame, but feeds XGBoost a numpy
+    array (columns in training order). Pandas conversion dominated solve time."""
+    bs = _boosters(model)
+    if bs is not None:
+        out = [b.inplace_predict(X) for b in bs]
+        return np.column_stack(out) if getattr(model, "estimators_", None) is not None else out[0]
+    estimators = getattr(model, "estimators_", None)
+    if estimators is not None:  # MultiOutputRegressor
+        return np.column_stack([e.predict(X) for e in estimators])
+    return model.predict(X)
 
 
 # ── 2. Feature Extraction (Matching train_2d.py) ──────────────────────────────
@@ -114,8 +153,9 @@ def extract_pool_features(master_width, master_length, length_remaining, section
         "pool_area_utilization":     round(total_area / (master_width * length_remaining), 4) if length_remaining > 0 else 0.0,
     })
 
-    X = pd.DataFrame([[feat.get(f, 0) for f in pool_features]], columns=pool_features)
-    return X, slots_window
+    # Plain feature row (ordered as pool_features); batched into a numpy array by the caller
+    row = [feat.get(f, 0) for f in pool_features]
+    return row, slots_window
 
 
 # ── 3. Multi-Window Construction ──────────────────────────────────────────────
@@ -192,7 +232,11 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
     if not active:
         return []
 
-    cache_key = (master_width, length_remaining, tuple(sorted((k, q) for k, q in pool.items() if q > 0)))
+    # master_length feeds the model features, and the models themselves can differ
+    # between callers, so both are part of the key. The cache is kept across solves
+    # (stacking variants and repeated checks hit the same sub-pools) and capped.
+    cache_key = (id(gen_model), id(scorer_model), master_width, master_length, length_remaining,
+                 tuple(sorted((k, q) for k, q in pool.items() if q > 0)))
     if cache_key in _SECTION_CAND_CACHE:
         return _SECTION_CAND_CACHE[cache_key]
 
@@ -334,35 +378,37 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
 
     num_slots = get_num_slots(pool_features)
 
-    # Explore candidate section lengths with batched ML inference
+    # Windows and feature rows for every candidate length, then ONE batched Model 1
+    # call for all of them (a call costs about the same for 6 rows as for 48)
+    per_len = []   # (s_len, [slots per window], first row index)
+    all_feats = []
     for s_len in candidate_lengths:
         windows = build_ml_windows(pool, master_width, length_remaining, s_len, num_slots=num_slots)
-        if not windows:
-            continue
-
-        # Extract features for all windows at once
-        win_feats = []
         win_slots = []
+        start = len(all_feats)
         for win in windows:
-            feat_df, slots = extract_pool_features(
+            feat_row, slots = extract_pool_features(
                 master_width, master_length, length_remaining, s_len, pool, pool_features, slots=win
             )
-            if feat_df is not None:
-                win_feats.append(feat_df.iloc[0])
+            if feat_row is not None:
+                all_feats.append(feat_row)
                 win_slots.append(slots)
+        per_len.append((s_len, win_slots, start))
 
-        if not win_feats:
+    all_preds = None
+    if all_feats:
+        try:
+            all_preds = _fast_predict(gen_model, np.asarray(all_feats, dtype=np.float32))
+        except Exception:
+            all_preds = [[0] * num_slots] * len(all_feats)
+
+    # Explore candidate section lengths
+    for s_len, win_slots, start in per_len:
+        if not win_slots:
             continue
 
-        # Single batched call to Model 1
-        X_batch = pd.DataFrame(win_feats, columns=pool_features)
-        try:
-            batch_preds = gen_model.predict(X_batch)
-        except Exception:
-            batch_preds = [[0] * num_slots] * len(win_feats)
-
         for w_idx, slots in enumerate(win_slots):
-            raw_preds = batch_preds[w_idx]
+            raw_preds = all_preds[start + w_idx]
             base_knives = []
             for i in range(num_slots):
                 w, l, q = slots[i]
@@ -457,9 +503,9 @@ def ml_generate_section_candidates(master_width, master_length, length_remaining
                     sc_row[f"assign_cust{i}_knives"] = 0
             sc_rows.append(sc_row)
 
-        X_sc = pd.DataFrame(sc_rows, columns=scorer_features)
+        X_sc = np.array([[r.get(f, np.nan) for f in scorer_features] for r in sc_rows], dtype=np.float32)
         try:
-            preds = scorer_model.predict(X_sc)
+            preds = _fast_predict(scorer_model, X_sc)
             for i, p_val in enumerate(preds):
                 result[i]["ml_pred_waste"] = round(float(p_val), 2)
         except Exception:
@@ -541,14 +587,34 @@ def find_length_partitions(master_length, active_lengths):
     return [p for _, p in partitions]
 
 
-def solve_2d(master_rolls, orders, gen_model, pool_features,
+def unplaced_cost(remaining, priority=None):
+    """Area of pieces left unplaced, weighted by delivery urgency.
+    priority: {(w, l): [weight per piece, most urgent first]}. Placed pieces go to the
+    most urgent orders, so the q pieces still unplaced are the q least urgent ones.
+    Without priority every piece weighs 1 (plain unplaced area)."""
+    cost = 0
+    for (w, l), q in remaining.items():
+        if q <= 0:
+            continue
+        ws = priority.get((w, l)) if priority else None
+        if ws:
+            tail = ws[-q:] if q <= len(ws) else ws + [ws[-1]] * (q - len(ws))
+            cost += w * l * sum(tail)
+        else:
+            cost += w * l * q
+    return cost
+
+
+def _solve_2d_core(master_rolls, orders, gen_model, pool_features,
              scorer_model=None, scorer_features=None,
              roll_inventory=None, beam_width=4,
-             return_inventory=False):
+             return_inventory=False, priority=None):
     """
     Purely ML-guided 2D cutting stock solver across master rolls and sections.
+    When stock is short, `priority` makes it leave out the least urgent pieces first.
     """
-    _SECTION_CAND_CACHE.clear()
+    if len(_SECTION_CAND_CACHE) > 20000:
+        _SECTION_CAND_CACHE.clear()
     beam_width = max(beam_width, 4)
     remaining = {}
     for w, l, q in orders:
@@ -653,7 +719,11 @@ def solve_2d(master_rolls, orders, gen_model, pool_features,
                 if not active_lens:
                     continue
 
-                candidate_partitions = find_length_partitions(ml, active_lens)
+                # A partition is at most 3 run lengths. With short orders (e.g. 50-300 m
+                # on a 4,000-8,000 m jumbo) these cover only a sliver of the roll, always
+                # lose to forward packing, and cost many ML calls - so skip them.
+                candidate_partitions = [p for p in find_length_partitions(ml, active_lens)
+                                        if sum(p) * 2 >= ml]
                 candidate_roll_plans = []
 
                 # ── Strategy 1: Partition-Guided Master Roll Construction ─────────
@@ -728,6 +798,24 @@ def solve_2d(master_rolls, orders, gen_model, pool_features,
                     first_cands.sort(key=score_section)
                     selected_cands = first_cands[:6]
 
+                    def repeat_run(sec, roll_sections, local_rem, length_remaining):
+                        """Cut the same run pattern again, back to back, while the roll
+                        length and the demand for every piece in it allow. Short orders
+                        (50-300 m on a 4,000-8,000 m jumbo) need dozens of runs per roll;
+                        repeating a good pattern fills the roll without re-running the
+                        ML for each run. Returns the length still free on the roll."""
+                        need = {k: q for k, q in sec["assignment"].items() if q > 0}
+                        if not need or sec["section_length"] <= 0:
+                            return length_remaining
+                        reps = min(length_remaining // sec["section_length"],
+                                   min(local_rem.get(k, 0) // q for k, q in need.items()))
+                        for _ in range(int(reps)):
+                            roll_sections.append(dict(sec))
+                            for k, q in need.items():
+                                local_rem[k] -= q
+                            length_remaining -= sec["section_length"]
+                        return length_remaining
+
                     for top_sec in selected_cands:
                         top_sec_copy = dict(top_sec)
                         top_sec_copy["candidates_explored"] = format_trials(first_cands, top_sec)
@@ -736,6 +824,7 @@ def solve_2d(master_rolls, orders, gen_model, pool_features,
                         for k, q in top_sec["assignment"].items():
                             local_rem[k] = max(0, local_rem.get(k, 0) - q)
                         length_remaining = ml - top_sec["section_length"]
+                        length_remaining = repeat_run(top_sec_copy, roll_sections, local_rem, length_remaining)
 
                         # Pack subsequent sections into this roll
                         while length_remaining > 0 and any(q > 0 for q in local_rem.values()):
@@ -773,6 +862,7 @@ def solve_2d(master_rolls, orders, gen_model, pool_features,
                             for k, q in sec_chosen["assignment"].items():
                                 local_rem[k] = max(0, local_rem.get(k, 0) - q)
                             length_remaining -= sec_chosen["section_length"]
+                            length_remaining = repeat_run(sec_chosen, roll_sections, local_rem, length_remaining)
 
                         candidate_roll_plans.append((roll_sections, local_rem))
 
@@ -838,7 +928,7 @@ def solve_2d(master_rolls, orders, gen_model, pool_features,
             break
 
         def rank_state(s):
-            rem_area = sum(w * l * q for (w, l), q in s["remaining"].items() if q > 0)
+            rem_area = unplaced_cost(s["remaining"], priority)
 
             # Count how many finite-stock (remnant) rolls vs new (infinite-stock) rolls were used
             remnant_rolls_used = sum(
@@ -898,7 +988,7 @@ def solve_2d(master_rolls, orders, gen_model, pool_features,
             break
 
     def final_rank(s):
-        rem_area = sum(w * l * q for (w, l), q in s["remaining"].items() if q > 0)
+        rem_area = unplaced_cost(s["remaining"], priority)
         new_rolls_used = sum(
             1 for r in s["plan"]
             if stock.get((r["master_width"], r["master_length"]), float("inf")) == float("inf")
@@ -915,6 +1005,140 @@ def solve_2d(master_rolls, orders, gen_model, pool_features,
     if return_inventory:
         return best["plan"], best["stock"]
     return best["plan"]
+
+
+# ── 6b. Lane Stacking (pieces end-to-end in one lane) ─────────────────────────
+# The core solver puts one piece per lane: every lane in a run is cut to (about) the
+# run length. Identical short pieces can also be wound end-to-end in ONE lane and
+# separated at rewinding, e.g. 2 x 200mm x 3,500m in one 200mm lane of a 7,000m run.
+# We model this by giving the core solver "stacked lanes" (w, k*l) as extra items,
+# then expand every lane back into its k pieces, so assignments always count real
+# customer pieces. Plans with and without stacking are compared; the better one wins.
+
+def _stacked_orders(master_rolls, orders, use_longest):
+    """Replace k identical pieces (w, l) with one stacked lane (w, k*l).
+    k is the most pieces that fit end-to-end in the longest (or shortest) master
+    length the width fits on. Returns (orders, stack_map) or (None, None)."""
+    demand = {}
+    for w, l, q in orders:
+        if q > 0:
+            demand[(w, l)] = demand.get((w, l), 0) + q
+    out, stacks, changed = {}, {}, False
+    for (w, l), q in demand.items():
+        lens = [ml for mw, ml in master_rolls if mw >= w and ml >= l]
+        k = min(q, (max(lens) if use_longest else min(lens)) // l) if lens else 1
+        if k < 2:
+            out[(w, l)] = out.get((w, l), 0) + q
+            continue
+        n, rest = divmod(q, k)
+        lane = (w, k * l)
+        out[lane] = out.get(lane, 0) + n
+        stacks.setdefault(lane, []).append([l, k, n])
+        if rest:
+            out[(w, l)] = out.get((w, l), 0) + rest
+        changed = True
+    if not changed:
+        return None, None
+    return [(w, l, q) for (w, l), q in out.items()], stacks
+
+
+def _expand_stacked_plan(plan, orders, stacks):
+    """Turn stacked lanes back into customer pieces. A lane (w, L) is a real (w, L)
+    piece while real demand for that size remains, otherwise a stack of k pieces."""
+    stacks = {lane: [list(x) for x in lst] for lane, lst in stacks.items()}
+    stacked_pieces = {}
+    for (w, L), lst in stacks.items():
+        for l, k, n in lst:
+            stacked_pieces[(w, l)] = stacked_pieces.get((w, l), 0) + n * k
+    # Real demand for a lane size = original demand minus pieces that went into stacks
+    orig = {}
+    for w, l, q in orders:
+        orig[(w, l)] = orig.get((w, l), 0) + q
+    single_rem = {k: orig[k] - stacked_pieces.get(k, 0) for k in orig}
+
+    for r in plan:
+        for s in r["sections"]:
+            pieces, lanes_info = {}, []
+            for (w, L), q in s["assignment"].items():
+                if q <= 0:
+                    continue
+                real = min(q, max(0, single_rem.get((w, L), 0)))
+                if real:
+                    single_rem[(w, L)] -= real
+                    pieces[(w, L)] = pieces.get((w, L), 0) + real
+                c = q - real
+                for item in stacks.get((w, L), []):
+                    if c <= 0:
+                        break
+                    l, k, n = item
+                    t = min(c, n)
+                    if t <= 0:
+                        continue
+                    item[2] -= t
+                    c -= t
+                    pieces[(w, l)] = pieces.get((w, l), 0) + t * k
+                    lanes_info.append({"width": w, "length": l, "stack": k, "lanes": t})
+                if c > 0:  # should not happen; keep the lane as-is rather than lose it
+                    pieces[(w, L)] = pieces.get((w, L), 0) + c
+            s["assignment"] = pieces
+            if lanes_info:
+                s["stacks"] = lanes_info
+    return plan
+
+
+def solve_2d(master_rolls, orders, gen_model, pool_features,
+             scorer_model=None, scorer_features=None,
+             roll_inventory=None, beam_width=4,
+             return_inventory=False, priority=None):
+    """2D solver with lane stacking: runs the core solver on the plain orders and on
+    stacked variants, and returns the plan that places the most pieces with the least
+    master-roll area (then least waste). With `priority`, urgent pieces are placed
+    first when stock is short."""
+    kw = dict(scorer_model=scorer_model, scorer_features=scorer_features,
+              roll_inventory=roll_inventory, beam_width=beam_width, return_inventory=True)
+    demand = {}
+    for w, l, q in orders:
+        if q > 0:
+            demand[(w, l)] = demand.get((w, l), 0) + q
+
+    def stacked_priority(stacks):
+        # A stacked lane of k pieces weighs the mean urgency of that piece size
+        if not priority:
+            return None
+        pr = {k: list(v) for k, v in priority.items()}
+        for lane, lst in stacks.items():
+            for l, k, n in lst:
+                ws = priority.get((lane[0], l)) or [1]
+                pr.setdefault(lane, []).extend([sum(ws) / len(ws)] * n)
+                pr[lane].sort(reverse=True)
+        return pr
+
+    def run(ords, stacks):
+        pr = stacked_priority(stacks) if stacks else priority
+        plan, inv = _solve_2d_core(master_rolls, ords, gen_model, pool_features, priority=pr, **kw)
+        if stacks:
+            plan = _expand_stacked_plan(plan, orders, stacks)
+        left = dict(demand)
+        for r in plan:
+            for s in r["sections"]:
+                for k, q in s["assignment"].items():
+                    left[k] = left.get(k, 0) - q
+        key = (unplaced_cost(left, priority), sum(r["roll_area"] for r in plan), sum(r["total_waste_area"] for r in plan))
+        return key, plan, inv
+
+    results = [run(orders, None)]
+    variants = []
+    for use_longest in (True, False):
+        ords, stacks = _stacked_orders(master_rolls, orders, use_longest)
+        if ords is not None and all(ords != v[0] for v in variants):
+            variants.append((ords, stacks))
+    for ords, stacks in variants:
+        results.append(run(ords, stacks))
+
+    _, plan, inv = min(results, key=lambda x: x[0])
+    if return_inventory:
+        return plan, inv
+    return plan
 
 
 # ── 7. Output Formatter ───────────────────────────────────────────────────────
@@ -934,7 +1158,7 @@ def print_plan_2d(plan):
     slitting_eff = round(total_used_area / total_slit_area * 100, 2) if total_slit_area else 0.0
 
     print("\n" + "=" * 76)
-    print("          2D ROLL CUTTING OPTIMIZATION PLAN  [100% Pure ML-Driven]")
+    print("          2D ROLL CUTTING OPTIMIZATION PLAN ")
     print("=" * 76)
 
     for r in plan:

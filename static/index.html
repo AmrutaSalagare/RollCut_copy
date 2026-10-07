@@ -4,13 +4,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RollCut OS - 1D Cutting Stock Optimization System</title>
+  <title>RollCut OS - Cutting Stock Optimization System</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=2.2">
+  <link rel="stylesheet" href="style.css?v=2.6">
 </head>
 
 <body>
@@ -98,25 +98,27 @@
     <!-- Operational KPI Summary Bar -->
     <section class="kpi-grid" id="kpi-section" style="display: none;">
       <div class="kpi-card yield-card">
-        <div class="kpi-label">Overall Material Yield</div>
+        <div class="kpi-label" id="kpi-yield-label">Material Yield</div>
         <div class="kpi-value" id="kpi-yield">--%</div>
         <div class="kpi-subtext" id="kpi-yield-sub">Mathematical optimum</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Master Rolls Consumed</div>
+        <div class="kpi-label" id="kpi-rolls-label">Master Rolls Used</div>
         <div class="kpi-value" id="kpi-rolls">--</div>
         <div class="kpi-subtext" id="kpi-capacity">Capacity: -- mm</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Material Demanded</div>
+        <div class="kpi-label" id="kpi-demand-label">Material Demanded</div>
         <div class="kpi-value" id="kpi-demand">-- mm</div>
         <div class="kpi-subtext" id="kpi-cuts-count">-- total cuts</div>
       </div>
       <div class="kpi-card scrap-card">
-        <div class="kpi-label">Net Scrap / Waste</div>
+        <div class="kpi-label" id="kpi-waste-label">Scrap</div>
         <div class="kpi-value" id="kpi-waste">-- mm</div>
         <div class="kpi-subtext" id="kpi-waste-pct">--% total scrap</div>
       </div>
+      <!-- 2D material balance: pieces + reusable leftover + scrap = 100% of master roll area -->
+      <div class="kpi-balance" id="kpi-balance" style="display: none;"></div>
     </section>
 
     <!-- Main Workspace Split Grid -->
@@ -141,8 +143,11 @@
             <!-- Chips rendered dynamically -->
           </div>
           <div class="add-chip-row">
+            <input type="text" id="input-new-roll-id" placeholder="Roll ID (auto: MR-001)" style="flex: 1.5; display: none;" title="Identifier for this master roll (auto-assigned if left blank)">
             <input type="number" id="input-new-roll" placeholder="Width in mm (e.g. 3000)" min="100" step="10" style="flex: 2;">
             <input type="number" id="input-new-roll-len" placeholder="Length in meters (e.g. 5000)" min="1" step="10" style="flex: 2; display: none;" title="Master roll length in meters">
+            <input type="text" id="input-new-roll-mat" placeholder="Material code" style="flex: 1.3; display: none;" title="Material / grade code (e.g. BOPP-20). Orders are only cut from master rolls of the same material.">
+            <input type="number" id="input-new-roll-gsm" placeholder="GSM (g/m²)" min="0.1" step="0.1" style="flex: 1.1; display: none;" title="Grammage in g/m² — used to calculate roll and order weights (kg)">
             <input type="number" id="input-new-roll-qty" placeholder="Stock Qty (∞)" min="1" step="1" style="flex: 1.2;" title="Available rolls in warehouse (leave blank for unlimited)">
             <button type="button" id="btn-add-roll" class="btn btn-secondary btn-sm">Add Stock</button>
           </div>
@@ -175,13 +180,19 @@
 
         <!-- Orders Table Grid -->
         <div class="table-wrapper">
-          <table class="data-table" id="orders-table">
+          <table class="data-table" id="orders-table" style="min-width: 720px;">
             <thead>
               <tr>
-                <th id="th-order-w" style="width: 50%;">Width (mm)</th>
-                <th id="th-order-l" style="width: 30%; display: none;">Length (m)</th>
-                <th id="th-order-q" style="width: 35%;">Quantity (pcs)</th>
-                <th style="width: 15%; text-align: center;">Action</th>
+                <th id="th-order-id" style="width: 100px;">Order ID</th>
+                <th id="th-order-item" style="width: 70px; display: none;" title="SAP-style line item within the order: 10, 20, 30 … (filled automatically)">Item</th>
+                <th id="th-order-cust" style="width: 140px; display: none;">Customer</th>
+                <th id="th-order-mat" style="width: 110px; display: none;">Material</th>
+                <th id="th-order-w" style="width: 120px;">Width (mm)</th>
+                <th id="th-order-l" style="width: 120px; display: none;">Length (m)</th>
+                <th id="th-order-q" style="width: 80px;">Qty</th>
+                <th id="th-order-date" style="width: 140px;">Order Date</th>
+                <th id="th-order-del" style="width: 140px;">Delivery Date</th>
+                <th style="width: 70px; text-align: center;">Action</th>
               </tr>
             </thead>
             <tbody id="orders-tbody">
@@ -203,9 +214,12 @@
         </div>
 
         <div class="submit-action-row" style="display: flex; gap: 8px;">
-          <button type="button" id="btn-solve" class="btn btn-primary btn-block" style="flex: 1;">
+          <button type="button" id="btn-solve" class="btn btn-primary btn-block" style="flex: 2;">
             <span id="btn-solve-text">Calculate Cutting Plan</span>
             <div id="btn-spinner" class="spinner" style="display: none;"></div>
+          </button>
+          <button type="button" id="btn-view-plan" class="btn btn-secondary" style="flex: 1; display: none;">
+            View Production Plan &rarr;
           </button>
           <button type="button" id="btn-reoptimize" class="btn btn-secondary" style="display: none; white-space: nowrap; align-items: center; justify-content: center; gap: 6px;" title="Re-plan remaining unfulfilled orders with available stock">
             <span id="btn-reoptimize-text">↻ Re-Plan Remaining</span>
@@ -217,10 +231,15 @@
       </section>
 
       <!-- Right Column: Output Visualization & Manifest -->
-      <section class="panel output-panel">
+      <section class="panel output-panel" style="display: none;">
         <div class="panel-header">
-          <h2 class="panel-title">Production Cutting Plan</h2>
-          <span class="panel-note" id="plan-status-note">Awaiting calculation</span>
+          <div>
+            <h2 class="panel-title">Production Cutting Plan</h2>
+            <span class="panel-note" id="plan-status-note">Awaiting calculation</span>
+          </div>
+          <button type="button" id="btn-back-inputs" class="btn btn-secondary btn-sm">
+            &larr; Back to Inputs
+          </button>
         </div>
 
         <!-- Print & Image Inclusion Controls -->
@@ -261,7 +280,7 @@
           </div>
           <h3 style="text-align: center; margin: 0 auto 8px auto; width: 100%;">No Cutting Plan Generated Yet</h3>
           <p style="text-align: center; margin: 0 auto; max-width: 440px; line-height: 1.6; color: var(--text-muted); width: 100%;">Define master roll inventory and order requirements on the left, then click <strong>Calculate Cutting
-              Plan</strong> to generate zero-waste patterns.</p>
+              Plan</strong> to generate low-waste patterns.</p>
         </div>
 
         <!-- Results Container -->
@@ -275,7 +294,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="app.js?v=2.8"></script>
+  <script src="app.js?v=3.7"></script>
 </body>
 
 </html>
