@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 
 <head>
   <meta charset="UTF-8">
@@ -8,9 +8,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=2.6">
+  <link rel="stylesheet" href="style.css?v=3.3">
 </head>
 
 <body>
@@ -125,6 +125,7 @@
     <main class="workspace-grid">
       <!-- Left Column: Input Controls -->
       <section class="panel input-panel">
+        <div class="input-card">
         <div class="panel-header">
           <div class="panel-title-group">
             <h2 class="panel-title">1. Master Roll Inventory</h2>
@@ -152,9 +153,9 @@
             <button type="button" id="btn-add-roll" class="btn btn-secondary btn-sm">Add Stock</button>
           </div>
         </div>
+        </div>
 
-        <div class="panel-divider"></div>
-
+        <div class="input-card">
         <div class="panel-header">
           <div class="panel-title-group">
             <h2 class="panel-title">2. Customer Demand Specification</h2>
@@ -212,6 +213,7 @@
           </button>
           <div class="summary-chip" id="demand-counter">Total Demand: 0 mm</div>
         </div>
+        </div>
 
         <div class="submit-action-row" style="display: flex; gap: 8px;">
           <button type="button" id="btn-solve" class="btn btn-primary btn-block" style="flex: 2;">
@@ -237,9 +239,15 @@
             <h2 class="panel-title">Production Cutting Plan</h2>
             <span class="panel-note" id="plan-status-note">Awaiting calculation</span>
           </div>
-          <button type="button" id="btn-back-inputs" class="btn btn-secondary btn-sm">
-            &larr; Back to Inputs
-          </button>
+          <div class="plan-header-actions">
+            <button type="button" id="btn-cancel-plan" class="btn btn-secondary btn-sm btn-cancel-plan" style="display: none;"
+              title="Discard this plan. Rolls already marked as Cut are kept; uncut 'To Manufacture' rolls are removed and their IDs freed.">
+              &#10005; Cancel Plan
+            </button>
+            <button type="button" id="btn-back-inputs" class="btn btn-secondary btn-sm">
+              &larr; Back to Inputs
+            </button>
+          </div>
         </div>
 
         <!-- Print & Image Inclusion Controls -->
@@ -294,7 +302,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="app.js?v=3.7"></script>
+  <script src="app.js?v=4.0"></script>
 </body>
 
 </html>

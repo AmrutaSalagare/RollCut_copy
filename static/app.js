@@ -104,6 +104,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const emptyState = document.getElementById("empty-state");
   const planContainer = document.getElementById("plan-container");
   const planStatusNote = document.getElementById("plan-status-note");
+  const btnCancelPlan = document.getElementById("btn-cancel-plan");
 
   // DOM Elements - Exports
   const btnExportImg = document.getElementById("btn-export-img");
@@ -114,7 +115,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const chkIncOrders = document.getElementById("chk-inc-orders");
   const chkIncScrap = document.getElementById("chk-inc-scrap");
 
-  // --- Theme Management (Default: Light Theme) ---
+  // --- Theme Management (Default: Midnight dark theme) ---
   const btnThemeToggle = document.getElementById("btn-theme-toggle");
   const themeIconSun = document.getElementById("theme-icon-sun");
   const themeIconMoon = document.getElementById("theme-icon-moon");
@@ -122,7 +123,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function applyTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("rollcut-theme", theme);
+    localStorage.setItem("rollcut-theme-v2", theme);
     if (theme === "dark") {
       if (themeIconSun) themeIconSun.style.display = "inline";
       if (themeIconMoon) themeIconMoon.style.display = "none";
@@ -134,7 +135,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  const savedTheme = localStorage.getItem("rollcut-theme") || "light";
+  const savedTheme = localStorage.getItem("rollcut-theme-v2") || "dark";
   applyTheme(savedTheme);
 
   if (btnThemeToggle) {
@@ -146,9 +147,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Distinct color palette for cut segments
   const PALETTE = [
-    "#0284c7", "#0d9488", "#2563eb", "#7c3aed",
-    "#059669", "#d97706", "#4f46e5", "#0891b2",
-    "#16a34a", "#ca8a04", "#9333ea", "#e11d48"
+    "#0d9488", "#2563eb", "#7c3aed", "#d97706",
+    "#0891b2", "#db2777", "#4f46e5", "#16a34a",
+    "#ca8a04", "#9333ea", "#0284c7", "#e11d48"
   ];
   const widthColorMap = new Map();
 
@@ -253,6 +254,7 @@ document.addEventListener("DOMContentLoaded", () => {
         planContainer.style.display = "none";
         kpiSection.style.display = "none";
         planStatusNote.textContent = "Awaiting calculation";
+        if (btnCancelPlan) btnCancelPlan.style.display = "none";
         btnExportImg.style.display = "none";
         btnPrint.style.display = "none";
         if (btnExportTrials) btnExportTrials.style.display = "none";
@@ -322,6 +324,7 @@ document.addEventListener("DOMContentLoaded", () => {
         planContainer.style.display = "none";
         kpiSection.style.display = "none";
         planStatusNote.textContent = "Awaiting calculation";
+        if (btnCancelPlan) btnCancelPlan.style.display = "none";
         btnExportImg.style.display = "none";
         btnPrint.style.display = "none";
         if (btnExportTrials) btnExportTrials.style.display = "none";
@@ -342,7 +345,8 @@ document.addEventListener("DOMContentLoaded", () => {
   function syncRemnantButtons() {
     document.querySelectorAll(".btn-remnant-action").forEach((btn) => {
       const w = parseInt(btn.getAttribute("data-width"), 10);
-      const exists = masterRolls.some((r) => r.width === w);
+      const uid = btn.getAttribute("data-roll-uid");
+      const exists = masterRolls.some((r) => r.isRemnant && r.sourceRollUid === uid);
       if (exists) {
         btn.classList.add("btn-remnant-added");
         btn.innerHTML = `
@@ -397,13 +401,9 @@ document.addEventListener("DOMContentLoaded", () => {
     masterRolls = masterRolls.filter((rem) => {
       if (!rem.isRemnant) return true;
 
+      // Only leftovers promised by an uncut roll of this plan; leftovers already in stock
+      // (e.g. created when an earlier roll was cut) stay in stock
       if (rem.sourceRollUid && uncutUids.has(rem.sourceRollUid)) {
-        remnantRollSizes.delete(rem.width);
-        return false;
-      }
-
-      const isUncut = uncutRolls.some((ur) => rem.width === ur.waste_mm);
-      if (isUncut && (!rem.sourceRollUid || uncutUids.has(rem.sourceRollUid))) {
         remnantRollSizes.delete(rem.width);
         return false;
       }
@@ -449,10 +449,37 @@ document.addEventListener("DOMContentLoaded", () => {
     rollIdFormat[mode] = f ? { prefix: f.prefix, pad: f.pad } : { prefix: `${id}-`, pad: 2 };
   }
 
-  function usedRollNumbers(list, prefix) {
+  // ID reuse rules:
+  //  - A roll that physically exists (real stock, a remnant, or a "To Manufacture" roll that has
+  //    been cut) keeps its ID forever. Deleting it retires the ID so it is never handed out again.
+  //  - A "To Manufacture" roll that was never cut did not exist yet. Deleting it (or cancelling
+  //    its plan) frees the ID, and the next new roll, manual or manufactured, takes the lowest free number.
+  const retiredRollIds = { "1d": new Set(), "2d": new Set() };
+
+  function isPhysicalRoll(r) {
+    if (!r.isToProduce) return true;
+    return (r.consumed_orders && r.consumed_orders.length > 0) || (r.qty !== null && r.qty <= 0);
+  }
+
+  function releaseRollIds(mode, removedRolls) {
+    removedRolls.forEach((r) => {
+      if (r.roll_id && isPhysicalRoll(r)) retiredRollIds[mode].add(r.roll_id);
+    });
+  }
+
+  function takenRollIds(mode) {
+    const taken = new Set(retiredRollIds[mode]);
+    (mode === "1d" ? masterRolls : masterRolls2D).forEach((r) => { if (r.roll_id) taken.add(r.roll_id); });
+    // IDs printed on the current plan's roll cards stay reserved until that plan is replaced or
+    // cancelled, so "Mark as Cut" on an old card can never hit a new roll that reused the ID
+    const data = mode === "1d" ? latestPlanData : latestPlanData2D;
+    if (data && data.plan) data.plan.forEach((r) => { if (r.master_roll_id) taken.add(r.master_roll_id); });
+    return taken;
+  }
+
+  function usedRollNumbers(mode, prefix) {
     const used = new Set();
-    list.forEach((r) => {
-      const id = r.roll_id || "";
+    takenRollIds(mode).forEach((id) => {
       if (id.startsWith(prefix) && /^\d+$/.test(id.slice(prefix.length))) used.add(parseInt(id.slice(prefix.length), 10));
     });
     return used;
@@ -470,8 +497,10 @@ document.addEventListener("DOMContentLoaded", () => {
       });
       fmt = best || fallback;
     }
-    const used = usedRollNumbers(list, fmt.prefix);
-    const n = used.size ? Math.max(...used) + 1 : 1;
+    // Lowest free number, so IDs freed by deleted (never-cut) rolls are filled first
+    const used = usedRollNumbers(mode, fmt.prefix);
+    let n = 1;
+    while (used.has(n)) n++;
     return fmt.prefix + String(n).padStart(fmt.pad, "0");
   }
 
@@ -492,6 +521,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     };
     masterRolls2D.forEach((r) => collect(r.roll_id));
+    retiredRollIds["2d"].forEach(collect);
     if (latestPlanData2D && latestPlanData2D.plan) latestPlanData2D.plan.forEach((r) => collect(r.master_roll_id));
     let n = 1;
     while (used.has(n)) n++;
@@ -616,6 +646,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         chip.querySelector(".chip-remove").addEventListener("click", (e) => {
           e.stopPropagation();
+          releaseRollIds("1d", [item]);
           masterRolls = masterRolls.filter((r) => r !== item);
           remnantRollSizes.delete(item.width);
           renderRollChips();
@@ -752,6 +783,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         chip.querySelector(".chip-remove").addEventListener("click", (e) => {
           e.stopPropagation();
+          releaseRollIds("2d", [item]);
           masterRolls2D = masterRolls2D.filter((r) => r !== item);
           remnantRollSizes2D.delete(chipKey);
           renderRollChips();
@@ -832,7 +864,7 @@ document.addEventListener("DOMContentLoaded", () => {
         // (AB-05 ×3 → AB-05, AB-06, AB-07), skipping numbers already in use
         const qtyToCreate = (qtyVal !== null && qtyVal > 1) ? qtyVal : 1;
         const fmt = parseRollIdFormat(enteredRollId);
-        const used = fmt ? usedRollNumbers(masterRolls2D, fmt.prefix) : new Set();
+        const used = fmt ? usedRollNumbers("2d", fmt.prefix) : new Set();
         let nextNum = fmt ? fmt.num : 0;
         for (let i = 0; i < qtyToCreate; i++) {
           let rollId;
@@ -919,9 +951,11 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnClearRolls) {
     btnClearRolls.addEventListener("click", () => {
       if (currentMode === "1d") {
+        releaseRollIds("1d", masterRolls);
         masterRolls = [];
         remnantRollSizes.clear();
       } else {
+        releaseRollIds("2d", masterRolls2D);
         masterRolls2D = [];
         remnantRollSizes2D.clear();
       }
@@ -1591,15 +1625,8 @@ document.addEventListener("DOMContentLoaded", () => {
         throw new Error(data.error || "Failed to calculate cutting plan.");
       }
 
-      // Sync remaining qty for REMNANT rolls only
-      if (data.remaining_inventory && typeof data.remaining_inventory === "object") {
-        const remaining = data.remaining_inventory;
-        masterRolls.forEach((r) => {
-          if (r.isRemnant && r.qty !== null && Object.prototype.hasOwnProperty.call(remaining, String(r.width))) {
-            r.qty = remaining[String(r.width)];
-          }
-        });
-      }
+      // Stock (remnants included) is only deducted on "Mark as Cut", never at plan time, so a
+      // cancelled or replaced plan leaves every stock roll in stock for the next plan.
 
       if (!isReplan) {
         completedRollIds.clear();
@@ -1633,6 +1660,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       masterRolls = masterRolls.filter((r) => {
         if (r.isRemnant && r.qty !== null && r.qty <= 0) {
+          releaseRollIds("1d", [r]);  // a used-up physical remnant keeps its ID retired
           remnantRollSizes.delete(r.width);
           return false;
         }
@@ -1642,8 +1670,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (latestPlanData && latestPlanData.plan) {
         latestPlanData.plan.forEach((roll) => {
           if (roll.waste_mm === 0) {
+            // Only the remnant promised by this same roll; leftovers already in stock stay
             masterRolls = masterRolls.filter((rem) => {
-              if (rem.isRemnant && (rem.sourceRollUid === roll.uid || !rem.sourceRollUid)) {
+              if (rem.isRemnant && rem.sourceRollUid === roll.uid) {
                 remnantRollSizes.delete(rem.width);
                 return false;
               }
@@ -1706,6 +1735,7 @@ document.addEventListener("DOMContentLoaded", () => {
     planContainer.innerHTML = "";
 
     const cutCount = plan.filter((r) => completedRollIds.has(r.uid)).length;
+    if (btnCancelPlan) btnCancelPlan.style.display = "inline-flex";
     planStatusNote.textContent = `${summary.rolls_used} master rolls planned (${cutCount} cut) • ${summary.efficiency_pct}% overall yield`;
 
     if (cutCount > 0 && btnReoptimize) {
@@ -1798,7 +1828,7 @@ document.addEventListener("DOMContentLoaded", () => {
               </svg>
               <span>Leftover: <strong>${roll.waste_mm.toLocaleString()} mm</strong> (Uncut remnant)</span>
             </div>
-            <button type="button" class="btn-remnant-action" data-width="${roll.waste_mm}">
+            <button type="button" class="btn-remnant-action" data-width="${roll.waste_mm}" data-roll-uid="${roll.uid}">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 5v14M5 12h14"></path>
               </svg>
@@ -2021,10 +2051,10 @@ document.addEventListener("DOMContentLoaded", () => {
         if (btnRemnant) {
           btnRemnant.addEventListener("click", () => {
             const w = roll.waste_mm;
-            const existing = masterRolls.find((r) => r.width === w);
+            const existing = masterRolls.find((r) => r.isRemnant && r.sourceRollUid === roll.uid);
             if (existing) {
-              masterRolls = masterRolls.filter((val) => val.width !== w);
-              remnantRollSizes.delete(w);
+              masterRolls = masterRolls.filter((val) => val !== existing);
+              if (!masterRolls.some((r) => r.isRemnant && r.width === w)) remnantRollSizes.delete(w);
             } else {
               masterRolls.push({ width: w, qty: 1, isRemnant: true, sourceRollUid: roll.uid });
               remnantRollSizes.add(w);
@@ -2413,6 +2443,7 @@ document.addEventListener("DOMContentLoaded", () => {
     planContainer.innerHTML = "";
 
     const cutCount = plan.filter((r) => completedRollIds2D.has(r.uid)).length;
+    if (btnCancelPlan) btnCancelPlan.style.display = "inline-flex";
     planStatusNote.textContent = `${summary.rolls_used} 2D master rolls planned (${cutCount} cut) • ${summary.slitting_efficiency_pct}% material yield`
       + (data.prioritized ? " • Not enough master rolls — orders with the earliest delivery dates were planned first" : "");
 
@@ -2520,7 +2551,7 @@ document.addEventListener("DOMContentLoaded", () => {
               </div>
               <div class="section-stats-inline">
                 Width: ${sec.used_width_mm.toLocaleString()} / ${roll.master_width.toLocaleString()} mm
-                &bull; ${isWidthRem ? "Side Offcut" : "Side Trim"}: <span style="color: ${isWidthRem ? 'var(--accent-primary, #2563eb)' : 'var(--accent-danger)'}; font-weight: 600;" title="Unused width across the full run length">${sec.width_waste_mm} mm (${wb.trimPct}%)</span>
+                &bull; ${isWidthRem ? "Side Offcut" : "Side Trim"}: <span style="color: ${isWidthRem ? 'var(--accent-remnant)' : 'var(--accent-danger)'}; font-weight: 600;" title="Unused width across the full run length">${sec.width_waste_mm} mm (${wb.trimPct}%)</span>
                 ${wb.hasTail ? `&bull; Length Tail: <span style="color: var(--accent-danger); font-weight: 600;" title="Pieces shorter than the run length leave an unused tail on their lanes">${wb.tailPct}%</span>` : ""}
                 &bull; Run Waste: <strong title="Side trim + length tail, as % of this run's area">${wb.totalPct}%</strong>
               </div>
@@ -4900,6 +4931,97 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (btnExportTrials) {
     btnExportTrials.addEventListener("click", downloadExplorationSpreadsheet);
+  }
+
+  // --- Cancel Plan ---
+  // Discards the current plan when it is not good enough. Rolls already marked as Cut are real
+  // production, so they stay (with their stock and order deductions). Everything else is undone:
+  // uncut "To Manufacture" rolls are removed, which frees their IDs for the next new roll, and
+  // remnants promised by uncut rolls are taken back out of stock. Stock and order quantities
+  // are only deducted on "Mark as Cut", so uncut rolls need no further restoring.
+  function cancelCurrentPlan() {
+    const is2D = currentMode === "2d";
+    const data = is2D ? latestPlanData2D : latestPlanData;
+    if (!data || !data.plan) return;
+    const done = is2D ? completedRollIds2D : completedRollIds;
+    const cutRolls = data.plan.filter((r) => done.has(r.uid));
+    const inventory = is2D ? masterRolls2D : masterRolls;
+    const mfgToRemove = inventory.filter((r) => r.isToProduce && !isPhysicalRoll(r));
+
+    const lines = ["Cancel this cutting plan?", ""];
+    if (cutRolls.length) lines.push(`• ${cutRolls.length} roll${cutRolls.length > 1 ? "s" : ""} already marked as Cut will be kept.`);
+    lines.push("• All uncut rolls are released back to stock.");
+    if (mfgToRemove.length) {
+      lines.push(`• ${mfgToRemove.length} "To Manufacture" roll${mfgToRemove.length > 1 ? "s" : ""} (${mfgToRemove.map((r) => r.roll_id).join(", ")}) will be removed; their IDs will be reused.`);
+    }
+    if (!window.confirm(lines.join("\n"))) return;
+
+    if (is2D) {
+      cleanupUncutRemnants2D();
+      masterRolls2D = masterRolls2D.filter((r) => !mfgToRemove.includes(r));
+    } else {
+      cleanupUncutRemnants1D();
+      masterRolls = masterRolls.filter((r) => !mfgToRemove.includes(r));
+    }
+    document.querySelectorAll(".unfulfilled-panel, .unfulfilled-plan-notice").forEach((el) => el.remove());
+
+    if (cutRolls.length) {
+      // Keep only the cut rolls as the record of what was actually produced (original roll numbers kept)
+      if (is2D) {
+        latestPlanData2D = {
+          summary: computePlanSummary2D(cutRolls),
+          plan: cutRolls,
+          unfulfilled_orders: [],
+          prioritized: !!data.prioritized
+        };
+        renderRollChips();
+        renderPlanResults2D(latestPlanData2D);
+      } else {
+        const used = cutRolls.reduce((acc, r) => acc + r.used_mm, 0);
+        const capacity = cutRolls.reduce((acc, r) => acc + r.roll_width, 0);
+        latestPlanData = {
+          summary: {
+            rolls_used: cutRolls.length,
+            total_demand_mm: used,
+            total_capacity_mm: capacity,
+            total_used_mm: used,
+            total_waste_mm: cutRolls.reduce((acc, r) => acc + r.waste_mm, 0),
+            efficiency_pct: roundToTwo((used / capacity) * 100)
+          },
+          plan: cutRolls,
+          unfulfilled_orders: []
+        };
+        renderRollChips();
+        renderPlanResults(latestPlanData);
+      }
+    } else {
+      if (is2D) {
+        latestPlanData2D = null;
+        completedRollIds2D.clear();
+      } else {
+        latestPlanData = null;
+        completedRollIds.clear();
+      }
+      emptyState.style.display = "flex";
+      planContainer.style.display = "none";
+      kpiSection.style.display = "none";
+      planStatusNote.textContent = "Awaiting calculation";
+      btnExportImg.style.display = "none";
+      btnPrint.style.display = "none";
+      if (btnExportTrials) btnExportTrials.style.display = "none";
+      if (exportOptionsBar) exportOptionsBar.style.display = "none";
+      if (btnReoptimize) btnReoptimize.style.display = "none";
+      if (btnCancelPlan) btnCancelPlan.style.display = "none";
+      if (document.getElementById("btn-view-plan")) {
+        document.getElementById("btn-view-plan").style.display = "none";
+      }
+      renderRollChips();
+    }
+    switchToInputsView();
+  }
+
+  if (btnCancelPlan) {
+    btnCancelPlan.addEventListener("click", cancelCurrentPlan);
   }
 
   // --- View Switching Logic ---
